@@ -53,6 +53,11 @@ export function VaultView() {
     if (ok) { selected.value = savedId; mode.value = 'view'; }
   };
 
+  const onImport = async (accounts) => {
+    const ok = await save((d) => { for (const a of accounts) putItem(d, { type: 'totp', name: a.name, otpauth: a.uri }); }, `Added ${accounts.length} two-factor codes`);
+    if (ok) { mode.value = 'view'; selected.value = null; filter.value = 'totp'; pane.value = 'list'; }
+  };
+
   const onDelete = async (item) => {
     const ok = await confirmDialog({ title: `Delete “${item.name}”?`, body: 'It will be removed from this vault on all your devices.', confirm: 'Delete', danger: true });
     if (!ok) return;
@@ -135,7 +140,7 @@ export function VaultView() {
         const t = draftType.value;
         return h('div', { class: 'detail' },
           h('header', { class: 'detail-header' }, BackButton(), h('div', { class: 'detail-heading' }, h('p', { class: 'eyebrow' }, 'New item'), h('h1', { class: 'detail-title' }, TYPES[t].label))),
-          ItemEditor({ item: { type: t }, onSave, onCancel: back, busy: () => busy.value }));
+          ItemEditor({ item: { type: t }, onSave, onCancel: back, onImport, busy: () => busy.value }));
       }
       // While editing, don't rebuild the form (and lose input) when a background refresh lands.
       const item = mode.value === 'edit' ? untrack(() => current.value) : current.value;

@@ -6,15 +6,59 @@
 //
 // Usage: node tools/e2e.js   (needs Chrome; set CHROME=/path/to/chrome if it isn't found)
 
-import { mkdtempSync, rmSync } from 'node:fs';
+import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { deflateSync, crc32 } from 'node:zlib';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { launch, HELPERS } from './browser.js';
 import { startDev } from './dev.js';
+import { encode, fillVersion, render, placed, migrationUri } from '../test/qr-encode.js';
 
 const bucketDir = mkdtempSync(join(tmpdir(), 'rspm-e2e-'));
 const dev = await startDev({ port: Number(process.env.E2E_PORT ?? 4760), bucketDir, powBits: 12, quiet: true });
-const browser = await launch({ port: 9340 });
+
+// What the fake camera shows: a QR code that isn't for two-factor, then a
+// GitHub setup code, looping. And a "screenshot" of a Google Authenticator export.
+const SCANNED = 'otpauth://totp/GitHub:octocat?secret=JBSWY3DPEHPK3PXP&issuer=GitHub';
+const camera = join(bucketDir, 'camera.y4m');
+{
+  const W = 480, H = 360, frames = [];
+  for (const [text, deg] of [['https://example.com/not-a-setup-code', 6], [SCANNED, -8]]) {
+    const q = encode(text, { level: 'M', mask: 2 });
+    const { data } = render(q, { width: W, height: H, corners: placed(q.size, { scale: Math.floor(220 / q.size), W, H, deg }), noise: 12 });
+    const frame = Buffer.alloc(W * H * 1.5, 128);
+    for (let i = 0; i < W * H; i++) frame[i] = data[i * 4];
+    for (let n = 0; n < 20; n++) frames.push(Buffer.from('FRAME\n'), frame); // 2 seconds each at 10 fps
+  }
+  writeFileSync(camera, Buffer.concat([Buffer.from(`YUV4MPEG2 W${W} H${H} F10:1 Ip A1:1 C420jpeg\n`), ...frames]));
+}
+const utf8 = (x) => new TextEncoder().encode(x);
+const EXPORT = migrationUri([
+  { secret: utf8('12345678901234567890'), name: 'Bank & Co:me@example.com', issuer: 'Bank & Co' },
+  { secret: utf8('abcdefghij'), name: 'alice@example.com', issuer: 'Example', algorithm: 2, digits: 2 },
+  { secret: utf8('abcdefghij'), name: 'counter', issuer: 'Old', type: 1 },
+]);
+const screenshot = join(bucketDir, 'screenshot.png');
+writeFileSync(screenshot, png(render(encode(EXPORT, { level: 'L', mask: 0 }), { scale: 5 })));
+
+/** RGBA → PNG, with Node's zlib. */
+function png({ data, width, height }) {
+  const chunk = (type, body) => {
+    const t = Buffer.concat([Buffer.from(type), body]), len = Buffer.alloc(4), crc = Buffer.alloc(4);
+    len.writeUInt32BE(body.length); crc.writeUInt32BE(crc32(t));
+    return Buffer.concat([len, t, crc]);
+  };
+  const ihdr = Buffer.alloc(13);
+  ihdr.writeUInt32BE(width, 0); ihdr.writeUInt32BE(height, 4); ihdr.set([8, 6, 0, 0, 0], 8);
+  const rows = Buffer.alloc((width * 4 + 1) * height);
+  for (let y = 0; y < height; y++) Buffer.from(data.buffer, y * width * 4, width * 4).copy(rows, y * (width * 4 + 1) + 1);
+  return Buffer.concat([Buffer.from([137, 80, 78, 71, 13, 10, 26, 10]), chunk('IHDR', ihdr), chunk('IDAT', deflateSync(rows)), chunk('IEND', Buffer.alloc(0))]);
+}
+
+const browser = await launch({
+  port: 9340,
+  args: ['--use-fake-ui-for-media-stream', '--use-fake-device-for-media-stream', `--use-file-for-fake-video-capture=${camera}`],
+});
 // This scenario's device record: device:{hex(salt(username))}, PROTOCOL §3.3 and §10.
 const DEVICE = `(async () => {
   const d = new Uint8Array(await crypto.subtle.digest('SHA-256', new TextEncoder().encode('rspm/v1/salt' + window.__user.trim().normalize('NFKC').toLowerCase())));
@@ -241,7 +285,115 @@ async function failures() {
   if (page.errors.length) { failed++; console.log(`  FAIL  ${name} › page errors\n        ${page.errors.join('\n        ')}`); }
 }
 
+/**
+ * Two-factor QR codes: our encoder against Chrome's own reader, the camera
+ * (a fake device playing a file) and a screenshot through the file picker,
+ * and the camera stopping when the vault locks.
+ */
+async function scanning() {
+  const name = 'scanning';
+  const page = await browser.page();
+  const step = async (label, body) => {
+    try {
+      const r = await page.eval(HELPERS + body, { userGesture: true });
+      console.log(`  ok    ${name} › ${label}${r ? ` (${r})` : ''}`);
+      return r;
+    } catch (err) {
+      failed++;
+      console.log(`  FAIL  ${name} › ${label}\n        ${err.message.split('\n')[0]}`);
+      err.reported = true;
+      throw err;
+    }
+  };
+  await page.send('DOM.enable');
+  await page.send('Page.setInterceptFileChooserDialog', { enabled: true });
+  page.listeners.push((m) => {
+    if (m.method === 'Page.fileChooserOpened') {
+      page.send('DOM.setFileInputFiles', { files: [screenshot], backendNodeId: m.params.backendNodeId }).catch((e) => page.errors.push(`file chooser: ${e.message}`));
+    }
+  });
+  await page.size(1280, 860);
+  await page.goto(`${dev.origin}/`);
+
+  // An independent check of the tables both our encoder and decoder use.
+  const codes = [];
+  for (let v = 1; v <= 40; v++) {
+    const level = 'LMQH'[v % 4], text = fillVersion(v, level, `${v}-${level} `);
+    const q = encode(text, { level, version: v, mask: v % 8 });
+    codes.push({ text, size: q.size, bits: Buffer.from(q.modules).toString('base64') });
+  }
+  await step('Chrome’s BarcodeDetector reads our test encoder’s codes, versions 1–40', `
+    if (!('BarcodeDetector' in window)) return 'skipped: no BarcodeDetector here';
+    const detector = new BarcodeDetector({ formats: ['qr_code'] });
+    for (const c of ${JSON.stringify(codes)}) {
+      const m = Uint8Array.from(atob(c.bits), (x) => x.charCodeAt(0)), s = 4, q = 4, n = c.size + 2 * q;
+      const canvas = new OffscreenCanvas(n * s, n * s), ctx = canvas.getContext('2d');
+      ctx.fillStyle = '#fff'; ctx.fillRect(0, 0, n * s, n * s); ctx.fillStyle = '#000';
+      for (let y = 0; y < c.size; y++) for (let x = 0; x < c.size; x++) if (m[y * c.size + x]) ctx.fillRect((x + q) * s, (y + q) * s, s, s);
+      const [hit] = await detector.detect(await createImageBitmap(canvas));
+      if (hit?.rawValue !== c.text) throw new Error(c.text.slice(0, 16) + ': read ' + JSON.stringify(hit?.rawValue));
+    }
+    return '40 codes';`);
+
+  const user = `e2e-scan-${Date.now().toString(36)}`;
+  const pw = 'violet-anchor-mosaic-tundra';
+  await step('create a vault', `
+    $t.click('Create a vault'); await $t.sleep(100);
+    document.querySelector('.toggle input').click(); $t.click('Continue'); await $t.sleep(100);
+    $t.type('Username', '${user}'); $t.type('Password', '${pw}'); $t.type('Confirm password', '${pw}');
+    $t.click('Continue'); await $t.sleep(150);
+    const key = document.querySelector('.account-key').textContent;
+    $t.click('Copy'); $t.click('I’ve saved it'); await $t.sleep(100);
+    $t.type('End of your Account Key', key.split('-').slice(-2).join('-'));
+    $t.click('Create vault');
+    await $t.until(() => document.querySelector('dialog .passkey-hero'), 30000);
+    $t.click('Remember without it'); await $t.until(() => !document.querySelector('dialog'));`);
+
+  await step('the camera ignores other QR codes, then reads the setup code', `
+    $t.click('New item'); await $t.sleep(100); $t.click('Two-factor code'); await $t.sleep(100);
+    $t.click('Scan QR code');
+    await $t.until(() => /isn’t a two-factor setup code/.test(document.querySelector('dialog .scan-problem')?.textContent ?? ''), 20000);
+    await $t.until(() => !document.querySelector('dialog'), 20000);
+    if ($t.field('Setup key').value !== ${JSON.stringify(SCANNED)}) throw new Error('setup key: ' + $t.field('Setup key').value);
+    if ($t.field('Name').value !== 'GitHub') throw new Error('name: ' + $t.field('Name').value);
+    $t.click('Add to vault');
+    await $t.until(() => document.querySelector('.detail-title')?.textContent === 'GitHub' && /^[0-9]{3} ?[0-9]{3}$/.test(document.querySelector('.totp-code')?.textContent.trim() ?? ''), 30000);`);
+
+  await step('a Google Authenticator export screenshot adds every account', `
+    $t.click('New item'); await $t.sleep(100); $t.click('Two-factor code'); await $t.sleep(100);
+    $t.click('From a screenshot');
+    await $t.until(() => /2 accounts in this export/.test(document.querySelector('dialog')?.textContent ?? ''), 20000)
+      .catch(() => { throw new Error('no accounts dialog; toasts: ' + [...document.querySelectorAll('.toast')].map((t) => t.textContent).join(' / ')); });
+    if (!/1 counter-based/.test(document.querySelector('dialog').textContent)) throw new Error('the HOTP entry wasn’t reported');
+    $t.click('Add all 2');
+    await $t.until(() => document.querySelectorAll('.item-row').length === 3, 30000);
+    const names = [...document.querySelectorAll('.item-row-name')].map((e) => e.textContent).sort();
+    if (names.join() !== 'Bank & Co,Example,GitHub') throw new Error(names.join());
+    const subs = [...document.querySelectorAll('.item-row-sub')].map((e) => e.textContent).join();
+    if (!subs.includes('Bank & Co · me@example.com')) throw new Error('subtitles: ' + subs);`);
+
+  await step('locking stops the camera', `
+    $t.click('Settings'); await $t.until(() => document.querySelector('.settings-section'));
+    [...document.querySelectorAll('.toggle')].find((t) => t.textContent.includes('goes to the background')).querySelector('input').click();
+    const streams = [];
+    const gum = navigator.mediaDevices.getUserMedia.bind(navigator.mediaDevices);
+    navigator.mediaDevices.getUserMedia = async (c) => { const s = await gum(c); streams.push(s); return s; };
+    $t.click('New item'); await $t.sleep(100); $t.click('Two-factor code'); await $t.sleep(100);
+    $t.click('Scan QR code');
+    // Lock while it's showing the other code, so the dialog is certainly open.
+    await $t.until(() => streams.length && /isn’t a two-factor/.test(document.querySelector('dialog .scan-problem')?.textContent ?? ''), 20000);
+    Object.defineProperty(document, 'visibilityState', { value: 'hidden', configurable: true });
+    document.dispatchEvent(new Event('visibilitychange'));
+    await $t.until(() => document.querySelector('.auth-card'));
+    if (document.querySelector('dialog, video')) throw new Error('the scanner survived the lock');
+    if (!streams[0].getTracks().every((t) => t.readyState === 'ended')) throw new Error('the camera is still running');
+    await new Promise((res) => { const r = indexedDB.open('rspm'); r.onsuccess = () => { const t = r.result.transaction('kv', 'readwrite'); t.objectStore('kv').put(false, 'lock-on-hide'); t.oncomplete = res; }; });`);
+
+  if (page.errors.length) { failed++; console.log(`  FAIL  ${name} › page errors\n        ${page.errors.join('\n        ')}`); }
+}
+
 try {
+  try { await scanning(); } catch (e) { if (!e.reported) { failed++; console.log(`  FAIL  scanning\n        ${e.message}`); } }
   try { await failures(); } catch { /* reported in step() */ }
   for (const [name, transport] of [['Touch ID', 'internal'], ['security key', 'usb']]) {
     try { await scenario(name, transport); } catch { /* reported in step() */ } finally { await cleanup(); }

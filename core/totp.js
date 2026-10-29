@@ -55,3 +55,87 @@ export async function totp(uriOrSecret, now = Date.now()) {
   const code = await hotp(p.secret, Math.floor(t / p.period), p);
   return { code, remaining: p.period - (t % p.period), period: p.period };
 }
+
+/** RFC 4648 base32, unpadded. */
+export function encodeSecret(bytes) {
+  const A = 'ABCDEFGHIJKLMNOPQRSTUVWXYZ234567';
+  let out = '', bits = 0, acc = 0;
+  for (const b of bytes) {
+    acc = ((acc << 8) | b) & 0xffff; bits += 8;
+    while (bits >= 5) { out += A[(acc >>> (bits - 5)) & 31]; bits -= 5; }
+  }
+  if (bits) out += A[(acc << (5 - bits)) & 31];
+  return out;
+}
+
+/**
+ * Google Authenticator's "Export accounts" QR codes:
+ * otpauth-migration://offline?data=<base64 protobuf MigrationPayload>.
+ * Returns { accounts: [{ name, issuer, uri }], skipped } where skipped counts
+ * entries we can't use (counter-based HOTP, MD5).
+ */
+export function parseMigration(uri) {
+  let u;
+  try { u = new URL(uri.trim()); } catch { u = null; }
+  if (!u || u.protocol !== 'otpauth-migration:') throw new Error('Not a Google Authenticator export');
+  const b64 = (u.searchParams.get('data') ?? '').replace(/-/g, '+').replace(/_/g, '/');
+  let bytes;
+  try { bytes = Uint8Array.from(atob(b64), (c) => c.charCodeAt(0)); } catch { throw new Error('The export data is damaged'); }
+
+  const accounts = [];
+  let skipped = 0;
+  for (const [field, value] of protobufFields(bytes)) {
+    if (field !== 1 || !(value instanceof Uint8Array)) continue;
+    const p = { secret: null, name: '', issuer: '', algorithm: 1, digits: 1, type: 2 };
+    for (const [f, v] of protobufFields(value)) {
+      if (f === 1 && v instanceof Uint8Array) p.secret = v;
+      else if (f === 2 && v instanceof Uint8Array) p.name = new TextDecoder().decode(v);
+      else if (f === 3 && v instanceof Uint8Array) p.issuer = new TextDecoder().decode(v);
+      else if (f === 4 && typeof v === 'number') p.algorithm = v;
+      else if (f === 5 && typeof v === 'number') p.digits = v;
+      else if (f === 6 && typeof v === 'number') p.type = v;
+    }
+    // Algorithm: 0/1 SHA1, 2 SHA256, 3 SHA512, 4 MD5. Digits: 0/1 six, 2 eight. Type: 1 HOTP, 2 TOTP.
+    const algorithm = { 0: 'SHA1', 1: 'SHA1', 2: 'SHA256', 3: 'SHA512' }[p.algorithm];
+    if (!p.secret?.length || p.type === 1 || !algorithm) { skipped++; continue; }
+    const digits = p.digits === 2 ? 8 : 6;
+    // The name is often "Issuer:account" already.
+    const account = p.issuer && p.name.startsWith(`${p.issuer}:`) ? p.name.slice(p.issuer.length + 1) : p.name;
+    const label = p.issuer ? `${encodeURIComponent(p.issuer)}:${encodeURIComponent(account)}` : encodeURIComponent(account);
+    const q = new URLSearchParams({ secret: encodeSecret(p.secret) });
+    if (p.issuer) q.set('issuer', p.issuer);
+    if (algorithm !== 'SHA1') q.set('algorithm', algorithm);
+    if (digits !== 6) q.set('digits', String(digits));
+    accounts.push({ name: p.issuer || account, account, issuer: p.issuer, uri: `otpauth://totp/${label}?${q}` });
+  }
+  if (!accounts.length && !skipped) throw new Error('The export has no accounts');
+  return { accounts, skipped };
+}
+
+/** Minimal protobuf reader: yields [field, value], value a number (varint) or Uint8Array (length-delimited). */
+function* protobufFields(b) {
+  let i = 0;
+  const varint = () => {
+    let v = 0, mul = 1;
+    for (;;) {
+      if (i >= b.length) throw new Error('The export data is damaged');
+      const x = b[i++];
+      v += (x & 0x7f) * mul;
+      if (!(x & 0x80)) return v;
+      mul *= 128;
+      if (mul > 2 ** 63) throw new Error('The export data is damaged');
+    }
+  };
+  while (i < b.length) {
+    const key = varint(), field = Math.floor(key / 8), wire = key & 7;
+    if (wire === 0) yield [field, varint()];
+    else if (wire === 2) {
+      const n = varint();
+      if (i + n > b.length) throw new Error('The export data is damaged');
+      yield [field, b.subarray(i, i + n)];
+      i += n;
+    } else if (wire === 1) i += 8;
+    else if (wire === 5) i += 4;
+    else throw new Error('The export data is damaged');
+  }
+}

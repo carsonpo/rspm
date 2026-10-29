@@ -18,6 +18,7 @@ code (PROTOCOL §2.2), so each is checked against two independent sources:
    | ML-KEM-768 | Go standard library `crypto/mlkem` (FIPS 140-3 module), plus NIST ACVP-Server vectors at a pinned commit | `gen/go.mod` (`go 1.26.0`) |
    | SHA3 / SHAKE | Go standard library `crypto/sha3` | same |
    | Argon2id, BLAKE2b | `golang.org/x/crypto/argon2`, `/blake2b` | `gen/go.mod` + `gen/go.sum` |
+   | QR code reader (`core/qr.js`) | `github.com/skip2/go-qrcode`: 100 codes covering versions 1–40, every error correction level, and numeric, alphanumeric and byte segments | same |
 
    Coverage is exhaustive across parameter edge cases and wide across random
    inputs: thousands of seeded KeyGen/Encaps/Decaps triples, including tampered
@@ -29,6 +30,12 @@ ML-KEM encapsulation is randomized in Go, so the generator runs our JS
 encapsulation (`gen/mlkem-encaps.mjs`) on seeded inputs and fails unless Go's
 decapsulation agrees on every shared secret. Generating therefore needs `node`
 on PATH.
+
+The QR code reader has no official vectors. Its second source is the browser:
+`tools/e2e.js` has Chrome's `BarcodeDetector` read codes from our test encoder
+(`qr-encode.js`) at every version, and `qr.test.js` checks that our reader
+decodes the same encoder's output, plus rotated, skewed, blurred and noisy
+renders of it.
 
 `gen/` is development tooling only. It runs with Go, writes JSON into
 `vectors/`, and is never part of what ships. The vectors are committed, so

@@ -2,9 +2,10 @@
 
 import { h, signal, effect, onCleanup, when, list, computed } from '../ui.js';
 import { icon } from '../icons.js';
-import { Button, IconButton, Field, Input, Textarea, PasswordInput, ValueRow, Monogram, Notice, Toggle, Segmented, copy, id, now, toast } from '../components.js';
+import { Button, IconButton, Field, Input, Textarea, PasswordInput, ValueRow, Monogram, Notice, Toggle, Segmented, DialogHeader, openDialog, copy, id, now, toast } from '../components.js';
 import { generatePassword, generatePassphrase, passwordBits, passphraseBits } from '../generator.js';
-import { totp, parseOtpauth } from '../../../core/totp.js';
+import { totp, parseOtpauth, parseMigration } from '../../../core/totp.js';
+import { cameraAvailable, scanWithCamera, scanFromImage } from './scan.js';
 
 export const TYPES = {
   login: { label: 'Login', plural: 'Logins', icon: 'login' },
@@ -150,8 +151,60 @@ function GeneratorPanel({ onUse }) {
       Button({ label: 'Use this', kind: 'primary', icon: 'check', onClick: () => onUse(value.peek()) })));
 }
 
-/** Editor for any item type. `onSave(item)` receives the edited item. */
-export function ItemEditor({ item, onSave, onCancel, busy }) {
+// ── Scanning setup codes ────────────────────────────────────────────────────
+
+/** Why a scanned QR code can't be used as a setup key, or null if it can. */
+function setupCodeProblem(text) {
+  const t = text.trim();
+  if (/^otpauth-migration:/i.test(t)) {
+    try { parseMigration(t); return null; } catch (e) { return e.message; }
+  }
+  try { parseOtpauth(t); return null; } catch (e) { return /^otpauth:/i.test(t) ? e.message : 'That QR code isn’t a two-factor setup code.'; }
+}
+
+const accountLabel = (a) => [a.issuer, a.account].filter(Boolean).join(' · ') || 'Unnamed account';
+
+/**
+ * A Google Authenticator export holds several accounts: pick one for this
+ * item, or (when `onImport` is given) add them all. Resolves with the
+ * account picked, or null.
+ */
+function chooseAccount({ accounts, skipped }, onImport) {
+  return openDialog((close) => [
+    DialogHeader({
+      title: accounts.length === 1 ? 'One account in this export' : `${accounts.length} accounts in this export`,
+      subtitle: skipped ? `${skipped} counter-based or unsupported ${skipped === 1 ? 'entry was' : 'entries were'} left out.` : null,
+      close: () => close(null),
+    }),
+    h('div', { class: 'dialog-body' },
+      h('ul', { class: 'pick-list' }, accounts.map((a) => h('li', null,
+        h('button', { type: 'button', class: 'pick-row', on: { click: () => close(a) } },
+          icon('clock', 16), h('span', { class: 'pick-row-text' }, accountLabel(a)), h('span', { class: 'pick-row-action' }, 'Use')))))),
+    h('footer', { class: 'dialog-footer' },
+      Button({ label: 'Cancel', onClick: () => close(null) }),
+      onImport && accounts.length > 1
+        ? Button({ label: `Add all ${accounts.length}`, icon: 'plus', kind: 'primary', onClick: async () => { close(null); await onImport(accounts); } })
+        : null),
+  ], { label: 'Choose an account' });
+}
+
+/** "Scan QR code" and "From a screenshot". `onCode(text)` gets an accepted code. */
+function ScanButtons({ onCode }) {
+  const fail = (msg) => toast(msg, { tone: 'danger', ms: 5000 });
+  const camera = cameraAvailable();
+  return h('div', { class: 'button-row scan-buttons' },
+    camera ? Button({ label: 'Scan QR code', icon: 'camera', size: 'sm', onClick: async () => { const t = await scanWithCamera(setupCodeProblem); if (t) onCode(t); } }) : null,
+    Button({
+      label: camera ? 'From a screenshot' : 'Scan a QR code image', icon: 'image', size: 'sm', kind: camera ? 'ghost' : 'secondary',
+      onClick: async () => { const t = await scanFromImage(setupCodeProblem, fail); if (t) onCode(t); },
+    }));
+}
+
+/**
+ * Editor for any item type. `onSave(item)` receives the edited item;
+ * `onImport(accounts)`, for new items, adds several two-factor codes at once.
+ */
+export function ItemEditor({ item, onSave, onCancel, onImport, busy }) {
   const type = item.type;
   const f = {
     name: signal(item.name ?? ''),
@@ -172,9 +225,25 @@ export function ItemEditor({ item, onSave, onCancel, busy }) {
     try { parseOtpauth(v); return null; } catch (e) { return e.message; }
   });
 
+  const useSetupKey = (uri) => {
+    f.otpauth.value = uri;
+    if (!f.name.peek().trim()) {
+      try { const p = parseOtpauth(uri); if (p.issuer || p.account) f.name.value = p.issuer || p.account; } catch { /* shown by the field */ }
+    }
+    toast('Setup key added', { tone: 'neutral' });
+  };
+  const onCode = async (text) => {
+    const t = text.trim();
+    if (!/^otpauth-migration:/i.test(t)) { useSetupKey(t); return; }
+    const exported = parseMigration(t);
+    const one = exported.accounts.length === 1 && !exported.skipped;
+    const pick = one ? exported.accounts[0] : await chooseAccount(exported, type === 'totp' ? onImport : null);
+    if (pick) useSetupKey(pick.uri);
+  };
+
   const submit = () => {
     if (!f.name.value.trim()) { error.value = 'Give this item a name'; return; }
-    if ((type === 'totp' && !f.otpauth.value.trim())) { error.value = 'Paste the setup key or otpauth:// link'; return; }
+    if ((type === 'totp' && !f.otpauth.value.trim())) { error.value = 'Scan the QR code or paste the setup key'; return; }
     if (otpError.peek()) { error.value = otpError.peek(); return; }
     const out = { ...item, name: f.name.value.trim(), notes: f.notes.value || undefined };
     if (type === 'login') Object.assign(out, { username: f.username.value, password: f.password.value, url: f.url.value.trim(), otpauth: f.otpauth.value.trim() || undefined });
@@ -227,9 +296,9 @@ export function ItemEditor({ item, onSave, onCancel, busy }) {
         ],
       }),
       Field({ label: 'Website', id: fid.url, optional: true, children: Input({ value: f.url, id: fid.url, placeholder: 'https://example.com', inputmode: 'url' }) }),
-      Field({ label: 'Two-factor setup key', id: fid.otpauth, optional: true, error: () => otpError.value, hint: 'Paste an otpauth:// link or the key shown when you set up two-factor.', children: Input({ value: f.otpauth, id: fid.otpauth, mono: true, placeholder: 'otpauth://totp/… or JBSW Y3DP …' }) }),
+      Field({ label: 'Two-factor setup key', id: fid.otpauth, optional: true, error: () => otpError.value, hint: 'Scan the QR code shown when you set up two-factor, or paste its otpauth:// link or key.', children: [Input({ value: f.otpauth, id: fid.otpauth, mono: true, placeholder: 'otpauth://totp/… or JBSW Y3DP …' }), ScanButtons({ onCode })] }),
     ],
-    type === 'totp' && Field({ label: 'Setup key', id: fid.otpauth, error: () => otpError.value, hint: 'Paste the otpauth:// link (from “can’t scan the QR code?”) or the base32 key.', children: Input({ value: f.otpauth, id: fid.otpauth, mono: true, placeholder: 'otpauth://totp/… or JBSW Y3DP …' }) }),
+    type === 'totp' && Field({ label: 'Setup key', id: fid.otpauth, error: () => otpError.value, hint: 'Scan the QR code from the setup page or a Google Authenticator export, or paste the otpauth:// link or base32 key.', children: [Input({ value: f.otpauth, id: fid.otpauth, mono: true, placeholder: 'otpauth://totp/… or JBSW Y3DP …' }), ScanButtons({ onCode })] }),
     type === 'totp' && Notice({ tone: 'warn', title: 'Both factors, one vault', children: 'Keeping two-factor codes alongside passwords is convenient, but it means one vault unlocks both. For your most important accounts, consider a separate authenticator.' }),
     type === 'note' && Field({ label: 'Note', id: fid.body, children: Textarea({ value: f.body, id: fid.body, rows: 10 }) }),
     type === 'env' && h('div', { class: 'field' },

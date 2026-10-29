@@ -60,6 +60,10 @@ export async function startDev({ port = 4747, bucketDir = join(root, '.dev-bucke
   await buildApp({ endpoints, outDir });
   const timer = setInterval(() => expire(env).catch(() => {}), 60000);
 
+  // Production's site-wide headers (Permissions-Policy and friends), so local runs get the same policy.
+  const site = JSON.parse(readFileSync(join(root, 'app/public/vercel.json'), 'utf8')).headers.find((x) => x.source === '/(.*)');
+  const siteHeaders = Object.fromEntries(site.headers.map(({ key, value }) => [key, value]));
+
   const server = createServer(async (req, res) => {
     const url = new URL(req.url, origin);
     try {
@@ -77,7 +81,7 @@ export async function startDev({ port = 4747, bucketDir = join(root, '.dev-bucke
       const name = url.pathname === '/' ? 'index.html' : url.pathname.slice(1);
       const file = join(outDir, name);
       if (name.includes('..') || name.includes('/') || !existsSync(file)) { res.writeHead(404).end('not found'); return; }
-      res.writeHead(200, { 'Content-Type': TYPES[extname(file)] ?? 'application/octet-stream', 'Cache-Control': 'no-store', 'X-Frame-Options': 'DENY' });
+      res.writeHead(200, { ...siteHeaders, 'Content-Type': TYPES[extname(file)] ?? 'application/octet-stream', 'Cache-Control': 'no-store' });
       res.end(readFileSync(file));
     } catch (err) {
       if (!quiet) console.error(err);

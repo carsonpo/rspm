@@ -14,12 +14,12 @@ const CANDIDATES = [
   '/usr/bin/chromium', '/usr/bin/google-chrome',
 ].filter(Boolean);
 
-export async function launch({ port = 9333, dataDir = mkdtempSync(join(tmpdir(), 'rspm-chrome-')) } = {}) {
+export async function launch({ port = 9333, dataDir = mkdtempSync(join(tmpdir(), 'rspm-chrome-')), args = [] } = {}) {
   const { existsSync } = await import('node:fs');
   const bin = CANDIDATES.find((p) => existsSync(p));
   if (!bin) throw new Error('no Chrome found; set CHROME=/path/to/chrome');
   const proc = spawn(bin, [`--remote-debugging-port=${port}`, `--user-data-dir=${dataDir}`, '--headless=new', '--no-first-run',
-    '--no-default-browser-check', '--disable-gpu', '--hide-scrollbars', '--force-device-scale-factor=2', 'about:blank'], { stdio: 'ignore' });
+    '--no-default-browser-check', '--disable-gpu', '--hide-scrollbars', '--force-device-scale-factor=2', ...args, 'about:blank'], { stdio: 'ignore' });
   for (let i = 0; i < 100; i++) {
     try { await fetch(`http://127.0.0.1:${port}/json/version`); break; } catch { await new Promise((r) => setTimeout(r, 100)); }
   }
@@ -80,9 +80,9 @@ class Page {
     await loaded;
   }
 
-  /** Evaluates an async function body in the page and returns its JSON value. */
-  async eval(body) {
-    const r = await this.send('Runtime.evaluate', { expression: `(async () => { ${body} })()`, awaitPromise: true, returnByValue: true });
+  /** Evaluates an async function body in the page and returns its JSON value. `userGesture` counts it as a click (file pickers need one). */
+  async eval(body, { userGesture = false } = {}) {
+    const r = await this.send('Runtime.evaluate', { expression: `(async () => { ${body} })()`, awaitPromise: true, returnByValue: true, userGesture });
     if (r.exceptionDetails) throw new Error(r.exceptionDetails.exception?.description ?? r.exceptionDetails.text);
     return r.result.value;
   }

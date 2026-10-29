@@ -506,6 +506,28 @@ code { background: var(--surface-2); padding: 0.1em 0.35em; border-radius: var(-
 .dialog-footer { display: flex; justify-content: flex-end; gap: var(--s2); padding: var(--s4) var(--s6) var(--s5); border-top: 1px solid var(--border); background: var(--bg); }
 .dialog-body .dialog-footer { margin: var(--s2) calc(-1 * var(--s6)) calc(-1 * var(--s5)); }
 
+/* ── QR scanning ─────────────────────────────────────────────────────────── */
+
+.scan-buttons { margin-top: var(--s2); }
+.scan-view { position: relative; aspect-ratio: 4 / 3; border-radius: var(--r-lg); overflow: hidden; background: #000; }
+.scan-video { width: 100%; height: 100%; object-fit: cover; display: block; }
+.scan-frame {
+  position: absolute; inset: 14% 22%; border-radius: var(--r-lg); pointer-events: none;
+  box-shadow: 0 0 0 999px rgb(0 0 0 / 0.35); outline: 2px solid rgb(255 255 255 / 0.85); outline-offset: -2px;
+}
+.scan-status { display: flex; align-items: flex-start; gap: var(--s2); font-size: var(--t-sm); }
+.scan-problem { color: var(--danger); }
+.scan-problem .icon { flex: none; margin-top: 1px; }
+.pick-list { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 2px; }
+.pick-row {
+  display: flex; align-items: center; gap: var(--s3); width: 100%; padding: var(--s3); border: 0; border-radius: var(--r);
+  background: none; color: inherit; font: inherit; text-align: left; cursor: pointer;
+}
+.pick-row:hover, .pick-row:focus-visible { background: var(--surface-2); }
+.pick-row .icon { color: var(--text-3); flex: none; }
+.pick-row-text { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.pick-row-action { color: var(--accent-text); font-size: var(--t-sm); font-weight: 560; }
+
 /* ── Toasts & banner ─────────────────────────────────────────────────────── */
 
 .toasts { position: fixed; z-index: 100; left: 50%; bottom: max(var(--s5), env(safe-area-inset-bottom)); transform: translateX(-50%); display: flex; flex-direction: column; align-items: center; gap: var(--s2); pointer-events: none; }
