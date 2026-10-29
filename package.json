@@ -1,0 +1,15 @@
+{
+  "name": "rspm",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "license": "MIT",
+  "scripts": {
+    "build": "node tools/build.js",
+    "test": "node tools/test.js",
+    "dev": "node tools/dev.js",
+    "e2e": "node tools/e2e.js",
+    "icons": "node tools/icon.js",
+    "vectors": "node tools/gen-vectors.js"
+  }
+}

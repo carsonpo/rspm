@@ -1,0 +1,253 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'self'; style-src 'self'; img-src 'self' data:; base-uri 'none'; form-action 'none'">
+<meta name="referrer" content="no-referrer">
+<meta name="color-scheme" content="light dark">
+<meta name="theme-color" content="#f4f3ee" media="(prefers-color-scheme: light)">
+<meta name="theme-color" content="#0f1110" media="(prefers-color-scheme: dark)">
+<title>rspm — your vault is public. On purpose.</title>
+<meta name="description" content="A really simple password manager. Everything is encrypted on your device and stored as identical 4 KB blocks in a public bucket. Anyone can download them. No one can read them.">
+<meta property="og:title" content="rspm — your vault is public. On purpose.">
+<meta property="og:description" content="Encrypted on your device. Stored in public. Readable by no one but you.">
+<link rel="icon" href="icon.svg" type="image/svg+xml">
+<link rel="stylesheet" href="site.css">
+<script src="site.js" defer></script>
+</head>
+<body>
+
+<header class="nav">
+  <a class="wordmark" href="#top" aria-label="rspm home">
+    <span class="wordmark-mark" aria-hidden="true"><svg viewBox="0 0 24 24" width="16" height="16"><rect x="5" y="11" width="14" height="10" rx="2.5"/><path d="M8 11V8a4 4 0 0 1 8 0v3"/></svg></span>
+    rspm
+  </a>
+  <nav class="nav-links" aria-label="Sections">
+    <a href="#how">How it works</a>
+    <a href="#developers">Developers</a>
+    <a href="#security">Security</a>
+    <a href="#source" data-repo>Source</a>
+  </nav>
+  <a class="btn btn-small" href="https://rspm.me">Open rspm <span aria-hidden="true">→</span></a>
+</header>
+
+<main id="top">
+
+  <!-- ── Hero ─────────────────────────────────────────────────────────── -->
+  <section class="hero">
+    <div class="hero-copy">
+      <p class="kicker"><span class="dot" aria-hidden="true"></span> A really simple password manager</p>
+      <h1 class="display">Your vault is public.<br><em>On purpose.</em></h1>
+      <p class="lede">rspm encrypts everything on your device, then stores it as identical 4&nbsp;KB blocks in a bucket anyone can download. There is no database to breach. There is nothing to leak. There is only noise — unless you’re you.</p>
+      <div class="hero-actions">
+        <a class="btn btn-primary" href="https://rspm.me">Create a vault</a>
+        <a class="btn btn-quiet" href="#demo">See what we store <span aria-hidden="true">↓</span></a>
+      </div>
+      <dl class="hero-facts">
+        <div><dt>0</dt><dd>dependencies</dd></div>
+        <div><dt>4096</dt><dd>bytes per block</dd></div>
+        <div><dt>128-bit</dt><dd>Account Key</dd></div>
+      </dl>
+    </div>
+    <figure class="bucket" aria-label="An animated view of the public bucket: thousands of identical encrypted blocks">
+      <div class="bucket-chrome">
+        <span class="bucket-dots" aria-hidden="true"><i></i><i></i><i></i></span>
+        <span class="bucket-url">blocks.rspm.me — public, read-only</span>
+      </div>
+      <canvas class="bucket-canvas" aria-hidden="true"></canvas>
+      <figcaption class="bucket-tip" aria-live="polite">
+        <span class="bucket-tip-path">b/····························</span>
+        <span class="bucket-tip-meta">4,096 bytes · owner unknown · contents unknown</span>
+      </figcaption>
+    </figure>
+  </section>
+
+  <!-- ── Demo ─────────────────────────────────────────────────────────── -->
+  <section class="section demo" id="demo">
+    <div class="section-head">
+      <p class="eyebrow">Try it</p>
+      <h2 class="title">This is everything our server will ever see.</h2>
+      <p class="sub">Type a secret. Your browser seals it into a real rspm block with AES-256-GCM — the same format the app uses. On the left, the bytes before encryption. On the right, the bytes that get published.</p>
+    </div>
+    <div class="demo-input">
+      <label for="secret" class="sr-only">A secret to encrypt</label>
+      <input id="secret" class="demo-field" type="text" value="correct horse battery staple" autocomplete="off" spellcheck="false" maxlength="200">
+      <button type="button" class="btn btn-quiet" id="reseal">Seal again</button>
+    </div>
+    <div class="demo-grid">
+      <figure class="demo-panel">
+        <figcaption><span class="tag tag-plain">Before</span> Your text, framed and padded to 4,067 bytes</figcaption>
+        <canvas class="bytes" id="plain" width="64" height="64" aria-label="Plaintext bytes visualized: mostly empty padding with your text at the start"></canvas>
+        <pre class="hex" id="plain-hex" aria-hidden="true"></pre>
+      </figure>
+      <div class="demo-arrow" aria-hidden="true">
+        <span>AES-256-GCM</span>
+        <svg viewBox="0 0 48 16" width="48" height="16"><path d="M0 8h44M38 2l6 6-6 6"/></svg>
+      </div>
+      <figure class="demo-panel">
+        <figcaption><span class="tag tag-cipher">After</span> The 4,096-byte block in the public bucket</figcaption>
+        <canvas class="bytes" id="cipher" width="64" height="64" aria-label="Encrypted bytes visualized: uniform noise"></canvas>
+        <pre class="hex" id="cipher-hex" aria-hidden="true"></pre>
+      </figure>
+    </div>
+    <p class="demo-note">Every block is the same size. A one-letter note and a thousand-password vault look identical from the outside. Change a single character and every byte changes. Nothing above leaves this page.</p>
+  </section>
+
+  <!-- ── Principles ───────────────────────────────────────────────────── -->
+  <section class="section">
+    <div class="section-head">
+      <p class="eyebrow">Principles</p>
+      <h2 class="title">Simple enough to trust. Strict enough to deserve it.</h2>
+    </div>
+    <div class="cards">
+      <article class="card">
+        <span class="card-num">01</span>
+        <h3>No recovery. On purpose.</h3>
+        <p>Password managers get breached through the doors they leave open for you. rspm has no reset flow, no support override, no escrow. Lose your credentials and the data is gone — which is exactly why nobody else can get to it.</p>
+      </article>
+      <article class="card">
+        <span class="card-num">02</span>
+        <h3>The server is untrusted.</h3>
+        <p>Our worker can create blocks and delete them with a token. That’s it. It never sees a key, a username, or which blocks belong together. If it lies or rolls back your vault, your device notices.</p>
+      </article>
+      <article class="card">
+        <span class="card-num">03</span>
+        <h3>Every block looks the same.</h3>
+        <p>Exactly 4,096 bytes. Names derived from your keys, so blocks can’t be linked to each other or to you. Vaults are padded to a power of two, so nobody can count your passwords.</p>
+      </article>
+      <article class="card">
+        <span class="card-num">04</span>
+        <h3>Zero dependencies.</h3>
+        <p>No frameworks, no packages, no build-time surprises. WebCrypto, WebAssembly we wrote by hand, and plain JavaScript you can read in an afternoon. The whole app ships as one HTML file.</p>
+      </article>
+    </div>
+  </section>
+
+  <!-- ── How it works ─────────────────────────────────────────────────── -->
+  <section class="section how" id="how">
+    <div class="section-head">
+      <p class="eyebrow">How it works</p>
+      <h2 class="title">Three secrets in. Indistinguishable noise out.</h2>
+    </div>
+    <ol class="flow">
+      <li class="flow-step">
+        <div class="flow-inputs">
+          <span class="chip">username</span><span class="chip">password</span><span class="chip chip-key">Account Key</span>
+        </div>
+        <h3>You bring three things.</h3>
+        <p>Your username and password stay in your head. The Account Key is a random 128-bit code generated on your device and printed on your Emergency Kit — it makes your vault unguessable even if your password isn’t perfect.</p>
+      </li>
+      <li class="flow-step">
+        <div class="flow-box mono">Argon2id · 64 MiB · HKDF</div>
+        <h3>Your device derives the keys.</h3>
+        <p>A memory-hard function turns your secrets into a locator key and an encryption key. It runs in WebAssembly we wrote instruction by instruction, tested against the RFC and a reference implementation.</p>
+      </li>
+      <li class="flow-step">
+        <div class="flow-box mono">block = AES-256-GCM(key, padded data)</div>
+        <h3>Your vault becomes blocks.</h3>
+        <p>Compressed, split, padded and sealed into 4,096-byte blocks, each named by an HMAC of your key. Each save writes a fresh generation and deletes the last — atomically, across all your devices.</p>
+      </li>
+      <li class="flow-step">
+        <div class="flow-box mono">PUT b/x7k2q… ← proof of work</div>
+        <h3>Anyone can hold them. Only you can open them.</h3>
+        <p>Blocks go to a public bucket. A tiny worker checks a proof of work and rejects anything that isn’t obviously ciphertext — so the bucket can’t become free storage — and then forgets you were there.</p>
+      </li>
+    </ol>
+  </section>
+
+  <!-- ── Developers ───────────────────────────────────────────────────── -->
+  <section class="section dev" id="developers">
+    <div class="dev-copy">
+      <p class="eyebrow">For developers</p>
+      <h2 class="title">Your secrets, in your shell. Not in your repo.</h2>
+      <p class="sub">Store environment variables as an item and inject them straight into any command. No <code>.env</code> files lying around, no secrets in shell history.</p>
+      <ul class="ticks">
+        <li><strong>Environments</strong> — named sets of variables, pasted from a <code>.env</code> or typed in.</li>
+        <li><strong>Two-factor codes</strong> — live TOTP codes in the app and in the CLI.</li>
+        <li><strong>One file</strong> — the CLI runs on Node, Bun or Deno with nothing to install.</li>
+      </ul>
+    </div>
+    <div class="terminal" role="img" aria-label="Terminal session using the rspm command-line client">
+      <div class="terminal-bar"><span class="bucket-dots" aria-hidden="true"><i></i><i></i><i></i></span><span>~/billing-api</span></div>
+      <pre class="terminal-body"><span class="t-prompt">$</span> rspm run --env billing-api-prod -- npm start
+<span class="t-dim">Password: ••••••••••••••••
+Account Key: ••••••••••••••••••••</span>
+<span class="t-ok">▲</span> server listening on :8080 <span class="t-dim">(STRIPE_SECRET_KEY, DATABASE_URL set)</span>
+
+<span class="t-prompt">$</span> rspm totp aws
+<span class="t-code">482 019</span>
+
+<span class="t-prompt">$</span> rspm get github --field username
+carson@example.com<span class="t-cursor" aria-hidden="true"></span></pre>
+    </div>
+  </section>
+
+  <!-- ── Sharing ──────────────────────────────────────────────────────── -->
+  <section class="section share">
+    <div class="section-head">
+      <p class="eyebrow">Sharing</p>
+      <h2 class="title">Share a secret. Watch it disappear.</h2>
+      <p class="sub">Links that expire on their own — after an hour, a day, or a single view. The key travels in the part of the URL your browser never sends to a server.</p>
+    </div>
+    <div class="share-grid">
+      <div class="url-demo" aria-label="Anatomy of a share link">
+        <div class="url mono"><span class="url-host">https://rspm.link/</span><span class="url-frag">#l1.<span class="url-exp">498147</span>.<span class="url-key">odxz5ph4gsfthcix64c47wwvmmy4…</span></span></div>
+        <dl class="url-legend">
+          <div><dt><i class="sw sw-host"></i>Sent to the server</dt><dd>Just the page. Nothing about the share.</dd></div>
+          <div><dt><i class="sw sw-exp"></i>Expiry hour</dt><dd>The worker deletes the blocks when it passes.</dd></div>
+          <div><dt><i class="sw sw-key"></i>Decryption key</dt><dd>Lives only after the <code>#</code>. Never transmitted.</dd></div>
+        </dl>
+      </div>
+      <div class="pq">
+        <h3>Or send it to a person — post-quantum.</h3>
+        <p>Publish a handle and anyone can share to it. Those links are sealed with a hybrid of <strong>X25519</strong> and <strong>ML-KEM-768</strong> (FIPS 203), so they stay closed even to a future quantum computer — and they’re useless to anyone but the recipient, even if forwarded.</p>
+        <p class="muted">Your vault itself uses only AES-256 and SHA-256, which are already safe against quantum attacks.</p>
+      </div>
+    </div>
+  </section>
+
+  <!-- ── Honesty ──────────────────────────────────────────────────────── -->
+  <section class="section honest" id="security">
+    <div class="section-head">
+      <p class="eyebrow">Security, honestly</p>
+      <h2 class="title">What rspm can’t do.</h2>
+      <p class="sub">Every security product has limits. Ours are written down.</p>
+    </div>
+    <div class="limits">
+      <div class="limit"><h3>It can’t protect a compromised device.</h3><p>Malware on your computer sees what you see. Encryption ends where your screen begins.</p></div>
+      <div class="limit"><h3>It can’t get your vault back.</h3><p>Lose your username, password or Account Key and the data is gone. We can’t help — that’s the point.</p></div>
+      <div class="limit"><h3>It can’t unshare a secret.</h3><p>Expiry deletes the ciphertext. It can’t make someone forget what they read. Rotate what matters.</p></div>
+      <div class="limit"><h3>It can’t make the web app trustless.</h3><p>Whoever serves the page could change it. So you can check it — or run your own copy.</p></div>
+    </div>
+    <div class="verify">
+      <div>
+        <h3>Don’t trust us. Check.</h3>
+        <p>The app is a single, deterministic HTML file. Rebuild it from the tagged source and compare hashes — or save it and run it from your own disk, forever.</p>
+      </div>
+      <pre class="verify-code mono"><span class="t-prompt">$</span> curl -s https://rspm.me | shasum -a 256
+<span class="t-prompt">$</span> git checkout v0.1.0 &amp;&amp; node tools/build.js
+<span class="t-prompt">$</span> shasum -a 256 dist/rspm.me/index.html</pre>
+    </div>
+  </section>
+
+  <!-- ── Open source ──────────────────────────────────────────────────── -->
+  <section class="section source" id="source">
+    <h2 class="display display-sm">Read every line.</h2>
+    <p class="lede">rspm is MIT-licensed. The protocol, the threat model, the hand-written WebAssembly and the tests are all in one small repository. If something looks wrong, it’s on the page.</p>
+    <div class="hero-actions center">
+      <a class="btn btn-primary" href="https://rspm.me">Create your vault</a>
+      <a class="btn btn-quiet" href="#" data-repo>Browse the source</a>
+    </div>
+  </section>
+
+</main>
+
+<footer class="footer">
+  <span class="wordmark wordmark-sm"><span class="wordmark-mark" aria-hidden="true"><svg viewBox="0 0 24 24" width="12" height="12"><rect x="5" y="11" width="14" height="10" rx="2.5"/><path d="M8 11V8a4 4 0 0 1 8 0v3"/></svg></span>rspm</span>
+  <span>really simple password manager · MIT</span>
+  <span class="footer-links"><a href="https://rspm.me">App</a><a href="#" data-repo>Source</a><a href="#" data-repo="docs/PROTOCOL.md">Protocol</a><a href="#" data-repo="docs/THREAT_MODEL.md">Threat model</a></span>
+</footer>
+
+</body>
+</html>

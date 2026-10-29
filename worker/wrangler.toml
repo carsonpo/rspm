@@ -1,0 +1,25 @@
+# Deploy: node tools/build.js wasm && npx wrangler deploy  (wrangler is a deploy
+# tool, not a dependency of the code).
+name = "rspm"
+main = "src/index.js"
+compatibility_date = "2026-10-01"
+
+routes = [{ pattern = "api.rspm.me", custom_domain = true }]
+
+[vars]
+POW_BITS = "18"
+APP_ORIGINS = "https://rspm.me"
+
+[[r2_buckets]]
+binding = "BUCKET"
+bucket_name = "rspm-blocks"
+
+[[ratelimits]]
+name = "RATE_LIMITER"
+namespace_id = "1001"
+simple = { limit = 120, period = 60 }
+
+[triggers]
+crons = ["5 * * * *"]
+
+# No [observability] block: the worker logs nothing beyond Cloudflare's defaults.
