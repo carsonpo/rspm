@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
-<meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'sha256-Uj4MTYQm8W+XDnGpIFfjPWul7RIoyNjWitf1pFEAQSc=' 'wasm-unsafe-eval'; style-src 'sha256-qWPQMqHOO+5Es3TnSAdV0bpU2Q9dtIsE/8PNZkgzbtY='; connect-src https://api.rspm.me; img-src data: 'self'; manifest-src 'self'; worker-src 'self'; base-uri 'none'; form-action 'none'; require-trusted-types-for 'script'; trusted-types rspm-sw">
+<meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'sha256-lW8Tnx8wjQgJYflDGByC3f/fmzJLKFbrK4nbdc1a8tg=' 'wasm-unsafe-eval'; style-src 'sha256-dCUUqygBjySfsCARww2rl5xEgAhDVbiqSnyYSbc9Tpw='; connect-src https://api.rspm.me; img-src data: 'self'; manifest-src 'self'; worker-src 'self'; base-uri 'none'; form-action 'none'; require-trusted-types-for 'script'; trusted-types rspm-sw">
 <meta name="referrer" content="no-referrer">
 <meta name="color-scheme" content="light dark">
 <meta name="theme-color" content="#f6f6f3" media="(prefers-color-scheme: light)">
@@ -603,6 +603,15 @@ code { background: var(--surface-2); padding: 0.1em 0.35em; border-radius: var(-
   .print-kit .key { font: 600 14pt/1.6 var(--mono); letter-spacing: 0.05em; }
   .print-kit .blank { color: #555; }
 }
+
+/* Passkeys (Settings → Unlocking) */
+.passkey-list { list-style: none; margin: 0; padding: 0; border: 1px solid var(--border); border-radius: var(--r); }
+.passkey-row { display: flex; align-items: center; gap: var(--s3); padding: var(--s2) var(--s3); min-height: 52px; }
+.passkey-row + .passkey-row { border-top: 1px solid var(--border); }
+.passkey-row-icon { display: grid; place-items: center; flex: none; width: 32px; height: 32px; border-radius: var(--r-sm); background: var(--accent-soft); color: var(--accent-text); }
+.passkey-row-text { flex: 1; min-width: 0; }
+.passkey-row-name { font-weight: 540; }
+.quick-toggle.is-busy { opacity: 0.6; pointer-events: none; }
 </style>
 </head>
 <body>
@@ -2134,14 +2143,15 @@ return { VaultNotFoundError, VaultExistsError, CorruptVaultError, RollbackError,
 
 // app/src/passkey.js
 const $m15 = (() => {
-// Protecting the remembered Account Key with a passkey or security key
+// Protecting what this device remembers with passkeys and security keys
 // (PROTOCOL §10.2).
 //
 // The WebAuthn PRF extension (CTAP2 hmac-secret) returns a secret that the
 // authenticator only releases after user verification — Touch ID, Face ID,
-// Windows Hello, or a YubiKey touch + PIN. That secret wraps the Account Key
-// stored on this device. No server is involved: assertions are never sent
-// anywhere, only the PRF output is used, locally.
+// Windows Hello, or a YubiKey touch + PIN. Each registered authenticator wraps
+// the same random device key, and the device key seals the Account Key (and,
+// with password-free unlock, the vault keys). No server is involved:
+// assertions are never sent anywhere, only the PRF output is used, locally.
 
 const { b64, b64decode, concat, utf8 } = $m4;
 const { aesKey, hkdf, open, random, seal } = $m5;
@@ -2165,21 +2175,52 @@ async function prfSupported() {
 
 // ── Wrapping (pure; tested in Node) ─────────────────────────────────────────
 
-const aad = (saltHex) => concat(utf8('rspm/v1/device'), utf8(saltHex));
-
-async function wrapKey(prf) {
-  return aesKey(await hkdf(prf, 'rspm/v1', 'device-wrap'));
-}
-
-/** Encrypts the Account Key under a PRF output, bound to this account's salt. */
-async function wrapAccountKey(prf, accountKey, saltHex) {
+async function lockWith(secret, info, label, data, saltHex) {
   const nonce = random(12);
-  const ct = await seal(await wrapKey(prf), nonce, accountKey, aad(saltHex));
-  return { nonce: b64(nonce), ct: b64(ct) };
+  const key = await aesKey(await hkdf(secret, 'rspm/v1', info));
+  return { nonce: b64(nonce), ct: b64(await seal(key, nonce, data, concat(utf8(`rspm/v1/${label}`), utf8(saltHex)))) };
 }
 
-async function unwrapAccountKey(prf, { nonce, ct }, saltHex) {
-  const k = await open(await wrapKey(prf), b64decode(nonce), b64decode(ct), aad(saltHex));
+async function unlockWith(secret, info, label, { nonce, ct }, saltHex) {
+  const key = await aesKey(await hkdf(secret, 'rspm/v1', info));
+  return open(key, b64decode(nonce), b64decode(ct), concat(utf8(`rspm/v1/${label}`), utf8(saltHex)));
+}
+
+/** Wraps the device key under one authenticator's PRF output. */
+const wrapDeviceKey = (prf, dk, saltHex) => lockWith(prf, 'device-wrap', 'device-key', dk, saltHex);
+
+async function unwrapDeviceKey(prf, rec, saltHex) {
+  const dk = await unlockWith(prf, 'device-wrap', 'device-key', rec, saltHex);
+  if (!dk || dk.length !== 32) throw new PasskeyError('This passkey doesn’t unlock the key stored on this device');
+  return dk;
+}
+
+/** A copy of the device key under the vault key, so an unlocked session can add passkeys without touching the others. */
+const escrowDeviceKey = (encRaw, dk, saltHex) => lockWith(encRaw, 'device-escrow', 'device-escrow', dk, saltHex);
+
+async function recoverDeviceKey(encRaw, rec, saltHex) {
+  const dk = rec && await unlockWith(encRaw, 'device-escrow', 'device-escrow', rec, saltHex);
+  return dk?.length === 32 ? dk : null;
+}
+
+/** Seals the Account Key, plus the vault keys when `keys` is given (password-free unlock). */
+function sealSecrets(dk, accountKey, keys, saltHex) {
+  const data = keys ? concat(accountKey, keys.loc, keys.encRaw) : accountKey;
+  return lockWith(dk, 'device-secrets', 'device-secrets', data, saltHex);
+}
+
+/** Returns { accountKey, keys? }, where keys is { loc, encRaw } for password-free unlock. */
+async function openSecrets(dk, rec, saltHex) {
+  const d = await unlockWith(dk, 'device-secrets', 'device-secrets', rec, saltHex);
+  if (d?.length === 16) return { accountKey: d };
+  if (d?.length === 80) return { accountKey: d.slice(0, 16), keys: { loc: d.slice(16, 48), encRaw: d.slice(48) } };
+  throw new PasskeyError('The key stored on this device is damaged');
+}
+
+/** Version 1 records (a single passkey wrapping the Account Key directly). Read only, for migration. */
+async function unwrapLegacyAccountKey(prf, { nonce, ct }, saltHex) {
+  const key = await aesKey(await hkdf(prf, 'rspm/v1', 'device-wrap'));
+  const k = await open(key, b64decode(nonce), b64decode(ct), concat(utf8('rspm/v1/device'), utf8(saltHex)));
   if (!k || k.length !== 16) throw new PasskeyError('This passkey doesn’t unlock the key stored on this device');
   return k;
 }
@@ -2194,14 +2235,18 @@ function explain(err) {
   return new PasskeyError(err?.message ?? String(err));
 }
 
-async function evaluate(credentialId, prfSalt) {
+/**
+ * Asks any of `ids` (b64 credential ids) for its PRF output over `prfSalt`.
+ * Returns { id, prf } for whichever authenticator answered.
+ */
+async function assert(ids, prfSalt) {
   let cred;
   try {
     cred = await navigator.credentials.get({
       publicKey: {
         challenge: random(32),
         rpId: location.hostname,
-        allowCredentials: [{ type: 'public-key', id: credentialId }],
+        allowCredentials: ids.map((id) => ({ type: 'public-key', id: b64decode(id) })),
         userVerification: 'required',
         timeout: 120000,
         extensions: { prf: { eval: { first: prfSalt } } },
@@ -2210,16 +2255,16 @@ async function evaluate(credentialId, prfSalt) {
   } catch (err) { throw explain(err); }
   const first = cred?.getClientExtensionResults?.().prf?.results?.first;
   if (!first) throw new PasskeyError('This authenticator didn’t return a key. It may not support the PRF extension.');
-  return new Uint8Array(first);
+  return { id: b64(new Uint8Array(cred.rawId)), prf: new Uint8Array(first) };
 }
 
 /**
- * Registers a new passkey and wraps `accountKey` with it. Must be called from a
- * user gesture. Returns the record to store in the device entry.
+ * Registers a new passkey. Must be called from a user gesture. `exclude` lists
+ * credential ids already registered, so the same key can't be added twice.
+ * Returns { record: { id, kind, created }, prf }.
  */
-async function enroll(accountKey, saltHex) {
+async function enroll(prfSalt, exclude = []) {
   if (!passkeysAvailable()) throw new PasskeyError('Passkeys need a secure (https) connection');
-  const prfSalt = random(32);
   let cred;
   try {
     cred = await navigator.credentials.create({
@@ -2230,6 +2275,7 @@ async function enroll(accountKey, saltHex) {
         user: { id: random(16), name: 'rspm Account Key', displayName: 'rspm Account Key' },
         challenge: random(32),
         pubKeyCredParams: [{ type: 'public-key', alg: -7 }, { type: 'public-key', alg: -8 }, { type: 'public-key', alg: -257 }],
+        excludeCredentials: exclude.map((id) => ({ type: 'public-key', id: b64decode(id) })),
         authenticatorSelection: { userVerification: 'required', residentKey: 'discouraged' },
         attestation: 'none',
         timeout: 120000,
@@ -2241,27 +2287,25 @@ async function enroll(accountKey, saltHex) {
   if (ext?.enabled === false) {
     throw new PasskeyError('This authenticator can’t protect keys (no PRF support). Try Touch ID, Face ID, Windows Hello or a YubiKey 5.');
   }
-  const id = new Uint8Array(cred.rawId);
+  const id = b64(new Uint8Array(cred.rawId));
   // Some authenticators return the PRF output at registration; others need a second touch.
   const first = ext?.results?.first;
-  const prf = first ? new Uint8Array(first) : await evaluate(id, prfSalt);
+  const prf = first ? new Uint8Array(first) : (await assert([id], prfSalt)).prf;
   return {
-    id: b64(id),
-    salt: b64(prfSalt),
-    kind: cred.authenticatorAttachment === 'cross-platform' ? 'security-key' : 'platform',
-    created: Math.floor(Date.now() / 1000),
-    ...(await wrapAccountKey(prf, accountKey, saltHex)),
+    record: { id, kind: cred.authenticatorAttachment === 'cross-platform' ? 'security-key' : 'platform', created: Math.floor(Date.now() / 1000) },
+    prf,
   };
 }
 
-/** Asks the authenticator for its PRF output and unwraps the Account Key. */
-async function unlock(record, saltHex) {
-  const prf = await evaluate(b64decode(record.id), b64decode(record.salt));
-  return unwrapAccountKey(prf, record, saltHex);
-}
+const kindLabel = (kind) => (kind === 'security-key' ? 'Security key' : 'Touch ID, Face ID or Windows Hello');
 
-const passkeyLabel = (record) => (record?.kind === 'security-key' ? 'your security key' : 'Touch ID, Face ID or Windows Hello');
-return { PasskeyError, passkeysAvailable, prfSupported, wrapAccountKey, unwrapAccountKey, enroll, unlock, passkeyLabel };
+/** How to describe "the thing you'll be asked for" given the registered passkeys. */
+function passkeyLabel(list) {
+  const kinds = new Set((Array.isArray(list) ? list : [list]).filter(Boolean).map((p) => p.kind));
+  if (kinds.size > 1) return 'a passkey or security key';
+  return kinds.has('security-key') ? 'your security key' : 'Touch ID, Face ID or Windows Hello';
+}
+return { PasskeyError, passkeysAvailable, prfSupported, wrapDeviceKey, unwrapDeviceKey, escrowDeviceKey, recoverDeviceKey, sealSecrets, openSecrets, unwrapLegacyAccountKey, assert, enroll, kindLabel, passkeyLabel };
 })();
 
 // app/src/session.js
@@ -2275,7 +2319,8 @@ const { Store } = $m10;
 const { deriveKeys, salt } = $m12;
 const { Vault, VaultNotFoundError, RollbackError, emptyDoc } = $m14;
 const { hex, b64, b64decode } = $m4;
-const { enroll, unlock, PasskeyError, passkeyLabel } = $m15;
+const { aesKey, random } = $m5;
+const { assert, enroll, PasskeyError, passkeyLabel, wrapDeviceKey, unwrapDeviceKey, escrowDeviceKey, recoverDeviceKey, sealSecrets, openSecrets, unwrapLegacyAccountKey } = $m15;
 const config = globalThis.RSPM_CONFIG ?? {
   api: location.origin, blocks: `${location.origin}/v1`, link: location.origin, version: 'dev',
 };
@@ -2292,18 +2337,27 @@ class SignInError extends Error {}
 
 const deviceKey = (saltHex) => `device:${saltHex}`;
 
+// Fields of a device record that belong to passkey protection (§10.2). `passkey` is the version 1 form.
+const PROTECTION = ['passkey', 'passkeys', 'prfSalt', 'dk', 'sealed', 'quick'];
+const strip = (rec) => { for (const f of PROTECTION) delete rec[f]; return rec; };
+
 async function deviceRecord(username) {
   if (!username.trim()) return null;
   return (await idb.get(deviceKey(hex(await salt(username))))) ?? null;
 }
+
+/** Whether a device record holds an Account Key, protected or not. */
+const remembersKey = (rec) => !!(rec?.akey || rec?.passkey || rec?.passkeys?.length);
+/** Whether a device record unlocks with a passkey alone. */
+const quickUnlock = (rec) => !!(rec?.quick && rec.passkeys?.length);
 
 const lastUsername = () => idb.get('last-username');
 
 async function remember(saltHex, username, { accountKey, rememberKey, gen }) {
   const rec = (await idb.get(deviceKey(saltHex))) ?? {};
   const next = { ...rec, maxGen: Math.max(rec.maxGen ?? 0, gen) };
-  if (rememberKey === true) { next.akey = b64(accountKey); delete next.passkey; }
-  if (rememberKey === false) { delete next.akey; delete next.passkey; }
+  if (rememberKey === true) { next.akey = b64(accountKey); strip(next); }
+  if (rememberKey === false) { delete next.akey; strip(next); }
   await idb.set(deviceKey(saltHex), next);
   if (rememberKey === true) await idb.set('last-username', username);
   if (rememberKey === false && (await idb.get('last-username')) === username) await idb.del('last-username');
@@ -2314,36 +2368,80 @@ function start(username, vault, accountKey, saltHex, extra = {}) {
   doc.value = vault.doc;
 }
 
+const vaultKeys = async ({ loc, encRaw }) => ({ loc, enc: await aesKey(encRaw), encRaw });
+
+/** Reads what this device's passkeys protect: { accountKey, keys?, legacyPrf? }. */
+async function unlockWithPasskey(rec, saltHex) {
+  if (rec.passkeys?.length) {
+    const { id, prf } = await assert(rec.passkeys.map((p) => p.id), b64decode(rec.prfSalt));
+    const pk = rec.passkeys.find((p) => p.id === id);
+    if (!pk) throw new PasskeyError('That passkey isn’t registered on this device');
+    return openSecrets(await unwrapDeviceKey(prf, pk, saltHex), rec.sealed, saltHex);
+  }
+  const { prf } = await assert([rec.passkey.id], b64decode(rec.passkey.salt));
+  return { accountKey: await unwrapLegacyAccountKey(prf, rec.passkey, saltHex), legacyPrf: prf };
+}
+
+/**
+ * Writes passkey protection for an open vault. `dk` is the device key, `quick`
+ * whether the vault keys are sealed too, `passkeys` the wrapped records.
+ */
+async function writeProtection(saltHex, { accountKey, keys, dk, prfSalt, passkeys, quick, maxGen }) {
+  const rec = strip((await idb.get(deviceKey(saltHex))) ?? {});
+  delete rec.akey;
+  await idb.set(deviceKey(saltHex), {
+    ...rec,
+    maxGen: Math.max(rec.maxGen ?? 0, maxGen ?? 0),
+    prfSalt: b64(prfSalt),
+    passkeys,
+    dk: await escrowDeviceKey(keys.encRaw, dk, saltHex),
+    sealed: await sealSecrets(dk, accountKey, quick ? keys : null, saltHex),
+    quick,
+  });
+}
+
 /**
  * Signs in. `accountKey` is null to use this device's remembered key.
  * `rememberKey` is true/false to change what the device remembers, or
- * undefined to leave it alone.
+ * undefined to leave it alone. `password` may be empty when this device has
+ * password-free unlock.
  */
 async function signIn({ username, password, accountKey, rememberKey, allowRollback = false }, onStep = () => {}) {
   const saltHex = hex(await salt(username));
   const rec = await idb.get(deviceKey(saltHex));
   let key = accountKey ?? (rec?.akey ? b64decode(rec.akey) : null);
-  if (!key && rec?.passkey) {
+  let stored = null;
+  if (!key && (rec?.passkeys?.length || rec?.passkey)) {
     // Ask the authenticator first, while the click that started this still counts as a user gesture.
-    onStep(`Waiting for ${passkeyLabel(rec.passkey)}`);
-    try { key = await unlock(rec.passkey, saltHex); } catch (err) {
+    onStep(`Waiting for ${passkeyLabel(rec.passkeys ?? rec.passkey)}`);
+    try { stored = await unlockWithPasskey(rec, saltHex); } catch (err) {
       throw new SignInError(err instanceof PasskeyError ? `${err.message}. You can sign in with your Account Key instead.` : err.message);
     }
+    key = stored.accountKey;
   }
   if (!key) throw new SignInError('Enter your Account Key');
-  onStep('Deriving your keys');
-  const keys = await deriveKeys(username, password, key);
+  if (!password && !stored?.keys) throw new SignInError('Enter your password');
+  onStep(password ? 'Deriving your keys' : 'Unlocking');
+  const keys = password ? await deriveKeys(username, password, key) : await vaultKeys(stored.keys);
   onStep('Finding your vault');
   let vault;
   try {
     vault = await Vault.open(store, keys, { minGen: allowRollback ? 0 : rec?.maxGen ?? 0 });
   } catch (err) {
     if (err instanceof VaultNotFoundError) {
-      throw new SignInError('Nothing matches that username, password and Account Key. Check each one — for your privacy, rspm can’t tell which is wrong.');
+      throw new SignInError(password
+        ? 'Nothing matches that username, password and Account Key. Check each one — for your privacy, rspm can’t tell which is wrong.'
+        : 'The keys saved on this device no longer open a vault. Your credentials may have changed on another device — sign in with your password.');
     }
     throw err;
   }
   await remember(saltHex, username, { accountKey: key, rememberKey, gen: vault.gen });
+  if (stored?.legacyPrf && rememberKey === undefined) {
+    // Upgrade a version 1 record while the authenticator's output is at hand.
+    const dk = random(32);
+    const pk = { id: rec.passkey.id, kind: rec.passkey.kind, created: rec.passkey.created, ...(await wrapDeviceKey(stored.legacyPrf, dk, saltHex)) };
+    await writeProtection(saltHex, { accountKey: key, keys, dk, prfSalt: b64decode(rec.passkey.salt), passkeys: [pk], quick: false });
+  }
   start(username, vault, key, saltHex, { rollback: allowRollback && rec?.maxGen > vault.gen });
 }
 
@@ -2390,24 +2488,70 @@ async function refresh() {
   }
 }
 
-/** Replaces the session's vault (after a credential change). */
-async function replaceVault(username, vault, accountKey, rememberKey) {
+/**
+ * Replaces the session's vault after a credential change. With the same
+ * username, whatever this device remembers is carried over to the new key and
+ * vault keys (passkeys stay registered). A new username starts a new device
+ * record, remembered plainly only if `rememberPlainly`.
+ */
+async function replaceVault(username, vault, accountKey, rememberPlainly) {
   const saltHex = hex(await salt(username));
   const old = session.peek();
-  if (old && old.saltHex !== saltHex) await idb.del(deviceKey(old.saltHex));
-  await remember(saltHex, username, { accountKey, rememberKey, gen: vault.gen });
+  const rec = await idb.get(deviceKey(saltHex));
+  if (old && old.saltHex === saltHex && rec) {
+    // The new vault's revisions start again from its own first head.
+    const next = { ...rec, maxGen: vault.gen };
+    if (next.akey) next.akey = b64(accountKey);
+    const dk = rec.passkeys?.length && await recoverDeviceKey(old.vault.keys.encRaw, rec.dk, saltHex);
+    if (dk) {
+      next.dk = await escrowDeviceKey(vault.keys.encRaw, dk, saltHex);
+      next.sealed = await sealSecrets(dk, accountKey, rec.quick ? vault.keys : null, saltHex);
+    } else strip(next);
+    await idb.set(deviceKey(saltHex), next);
+  } else {
+    if (old) await idb.del(deviceKey(old.saltHex));
+    await remember(saltHex, username, { accountKey, rememberKey: rememberPlainly ? true : undefined, gen: vault.gen });
+  }
   start(username, vault, accountKey, saltHex);
 }
 
-/** Registers a passkey for this device and stores the Account Key wrapped by it. Call from a user gesture. */
-async function protectWithPasskey() {
+/**
+ * Registers another passkey or security key for this device and remembers the
+ * Account Key under it. Call from a user gesture.
+ */
+async function addPasskey() {
   const s = session.peek();
   if (!s) return;
-  const record = await enroll(s.accountKey, s.saltHex);
   const rec = (await idb.get(deviceKey(s.saltHex))) ?? {};
-  delete rec.akey;
-  await idb.set(deviceKey(s.saltHex), { ...rec, passkey: record, maxGen: Math.max(rec.maxGen ?? 0, s.vault.gen) });
+  // Existing passkeys stay valid only if this session can recover the device key they wrap.
+  const current = rec.passkeys?.length ? await recoverDeviceKey(s.vault.keys.encRaw, rec.dk, s.saltHex) : null;
+  const keep = current ? rec.passkeys : [];
+  const dk = current ?? random(32);
+  const prfSalt = current ? b64decode(rec.prfSalt) : random(32);
+  const { record, prf } = await enroll(prfSalt, keep.map((p) => p.id));
+  const passkeys = [...keep, { ...record, ...(await wrapDeviceKey(prf, dk, s.saltHex)) }];
+  await writeProtection(s.saltHex, { accountKey: s.accountKey, keys: s.vault.keys, dk, prfSalt, passkeys, quick: !!(current && rec.quick), maxGen: s.vault.gen });
   await idb.set('last-username', s.username);
+}
+
+/** Removes one passkey. Removing the last one forgets the Account Key on this device. */
+async function removePasskey(id) {
+  const s = session.peek();
+  if (!s) return;
+  const rec = (await idb.get(deviceKey(s.saltHex))) ?? {};
+  const passkeys = (rec.passkeys ?? []).filter((p) => p.id !== id);
+  if (passkeys.length) await idb.set(deviceKey(s.saltHex), { ...rec, passkeys });
+  else await forgetDevice();
+}
+
+/** Turns password-free unlock on or off: whether the vault keys are sealed alongside the Account Key. */
+async function setQuickUnlock(on) {
+  const s = session.peek();
+  if (!s) return;
+  const rec = (await idb.get(deviceKey(s.saltHex))) ?? {};
+  const dk = rec.passkeys?.length && await recoverDeviceKey(s.vault.keys.encRaw, rec.dk, s.saltHex);
+  if (!dk) throw new PasskeyError('Add a passkey or security key first');
+  await idb.set(deviceKey(s.saltHex), { ...rec, sealed: await sealSecrets(dk, s.accountKey, on ? s.vault.keys : null, s.saltHex), quick: on });
 }
 
 /** Remembers the Account Key on this device without a passkey. */
@@ -2425,7 +2569,7 @@ function lock() {
   session.value = null;
   doc.value = null;
 }
-return { config, store, session, doc, saving, SignInError, deviceRecord, lastUsername, signIn, createAccount, save, refresh, replaceVault, protectWithPasskey, rememberPlain, forgetDevice, lock };
+return { config, store, session, doc, saving, SignInError, deviceRecord, remembersKey, quickUnlock, lastUsername, signIn, createAccount, save, refresh, replaceVault, addPasskey, removePasskey, setQuickUnlock, rememberPlain, forgetDevice, lock };
 })();
 
 // app/src/build-info.js
@@ -2763,30 +2907,60 @@ function StrengthMeter({ value }) {
 return { strongEnough, StrengthMeter };
 })();
 
-// app/src/views/device.js
+// app/src/lock.js
 const $m22 = (() => {
-// "This device" controls: how the Account Key is remembered here.
+// Auto-lock: after a period of inactivity, and optionally whenever the app is
+// hidden. Both are per-device preferences.
+
+const { signal } = $m0;
+const idb = $m3;
+const { session, lock } = $m16;
+const LOCK_OPTIONS = [
+  ['1', '1 minute'], ['5', '5 minutes'], ['10', '10 minutes'], ['15', '15 minutes'],
+  ['30', '30 minutes'], ['60', '1 hour'], ['240', '4 hours'], ['480', '8 hours'],
+];
+
+const lockMinutes = signal(10);
+const lockOnHide = signal(false);
+idb.get('lock-minutes').then((m) => { if (LOCK_OPTIONS.some(([v]) => Number(v) === m)) lockMinutes.value = m; });
+idb.get('lock-on-hide').then((v) => { lockOnHide.value = v === true; });
+
+function setLockMinutes(m) { lockMinutes.value = Number(m); idb.set('lock-minutes', Number(m)); }
+function setLockOnHide(on) { lockOnHide.value = on; idb.set('lock-on-hide', on); }
+
+/** Starts watching for inactivity. Called once at startup. */
+function startAutoLock() {
+  let lastActive = Date.now();
+  for (const ev of ['pointerdown', 'keydown', 'wheel', 'touchstart']) {
+    window.addEventListener(ev, () => { lastActive = Date.now(); }, { passive: true, capture: true });
+  }
+  // Checked on an interval and on return, since timers pause while a device sleeps.
+  const check = () => { if (session.peek() && Date.now() - lastActive > lockMinutes.peek() * 60000) lock(); };
+  setInterval(check, 5000);
+  document.addEventListener('visibilitychange', () => {
+    if (document.visibilityState === 'hidden' && lockOnHide.peek()) lock();
+    else check();
+  });
+}
+return { LOCK_OPTIONS, lockMinutes, lockOnHide, setLockMinutes, setLockOnHide, startAutoLock };
+})();
+
+// app/src/views/device.js
+const $m23 = (() => {
+// "Unlocking on this device": passkeys, password-free unlock, and auto-lock.
 
 const { h, signal } = $m0;
 const { icon } = $m1;
-const { Button, Notice, DialogHeader, openDialog, toast, confirmDialog } = $m2;
-const { session, protectWithPasskey, rememberPlain, forgetDevice } = $m16;
-const { passkeysAvailable, prfSupported, passkeyLabel } = $m15;
+const { Button, Notice, DialogHeader, Select, Toggle, openDialog, toast, confirmDialog } = $m2;
+const { session, addPasskey, removePasskey, setQuickUnlock, rememberPlain, forgetDevice } = $m16;
+const { passkeysAvailable, prfSupported, kindLabel } = $m15;
+const { LOCK_OPTIONS, lockMinutes, lockOnHide, setLockMinutes, setLockOnHide } = $m22;
 const idb = $m3;
-/** Signal of this account's device record ({ akey?, passkey?, maxGen }). */
-function deviceState() {
-  const s = session.peek();
-  const state = signal(null);
-  const reload = async () => { state.value = (await idb.get(`device:${s.saltHex}`)) ?? {}; };
-  reload();
-  return { state, reload };
-}
-
 /**
- * Offers to protect the Account Key with a passkey. The button inside the
- * dialog provides the fresh user gesture WebAuthn requires.
+ * Offers to protect the Account Key with a passkey (or to add another one).
+ * The button inside the dialog provides the fresh user gesture WebAuthn requires.
  */
-function offerPasskeySetup({ fallbackPlain = false } = {}) {
+function offerPasskeySetup({ fallbackPlain = false, another = false } = {}) {
   return openDialog((close) => {
     const busy = signal(false);
     const error = signal(null);
@@ -2794,8 +2968,8 @@ function offerPasskeySetup({ fallbackPlain = false } = {}) {
       busy.value = true;
       error.value = null;
       try {
-        await protectWithPasskey();
-        toast('Your Account Key is protected on this device');
+        await addPasskey();
+        toast(another ? 'Passkey added' : 'Your Account Key is protected on this device');
         close(true);
       } catch (e) { error.value = e.message; } finally { busy.value = false; }
     };
@@ -2804,82 +2978,152 @@ function offerPasskeySetup({ fallbackPlain = false } = {}) {
       close(false);
     };
     return [
-      DialogHeader({ title: 'Protect your Account Key', close: () => skip() }),
+      DialogHeader({ title: another ? 'Add a passkey or security key' : 'Protect your Account Key', close: () => skip() }),
       h('div', { class: 'dialog-body stack' },
         h('div', { class: 'passkey-hero' }, h('span', { class: 'passkey-icon' }, icon('key', 22)),
-          h('p', null, 'Use Touch ID, Face ID, Windows Hello or a security key like a YubiKey. This device will keep your Account Key encrypted, and only your fingerprint, face or key can release it.')),
-        h('p', { class: 'muted small' }, 'You’ll still need your password. Your Emergency Kit keeps working everywhere — this only changes how this device remembers the key.'),
+          h('p', null, another
+            ? 'Register another way to unlock on this device — for example a YubiKey as a backup to Face ID. Any one of them will work.'
+            : 'Use Touch ID, Face ID, Windows Hello or a security key like a YubiKey. This device will keep your Account Key encrypted, and only your fingerprint, face or key can release it.')),
+        h('p', { class: 'muted small' }, another
+          ? 'If you’re asked to choose, pick the authenticator you haven’t added yet.'
+          : 'You can add more passkeys later in Settings. Your Emergency Kit keeps working everywhere — this only changes how this device remembers the key.'),
         () => (error.value ? Notice({ tone: 'danger', title: error.value }) : null)),
       h('footer', { class: 'dialog-footer' },
         Button({ label: fallbackPlain ? 'Remember without it' : 'Not now', kind: 'ghost', onClick: skip }),
-        Button({ label: 'Set up', icon: 'key', kind: 'primary', onClick: go, busy: () => busy.value })),
+        Button({ label: another ? 'Add' : 'Set up', icon: 'key', kind: 'primary', onClick: go, busy: () => busy.value })),
     ];
   }, { label: 'Protect your Account Key' });
 }
 
-/** Settings rows for this device. */
-function DeviceRows({ Row }) {
-  const { state, reload } = deviceState();
-  const canPasskey = passkeysAvailable();
+const added = (p) => (p.created ? `Added ${new Date(p.created * 1000).toLocaleDateString(undefined, { year: 'numeric', month: 'short', day: 'numeric' })}` : '');
+
+/** Settings section for how this device unlocks and locks. */
+function UnlockSection({ Section, Row }) {
+  const s = session.peek();
+  const state = signal(null);
+  const reload = async () => { state.value = (await idb.get(`device:${s.saltHex}`)) ?? {}; };
+  reload();
   const prf = signal(null);
   prfSupported().then((v) => { prf.value = v; });
+  const canAdd = () => passkeysAvailable() && prf.value !== false;
 
   const forget = async () => {
-    const ok = await confirmDialog({ title: 'Forget your Account Key on this device?', body: 'You’ll need your Emergency Kit the next time you sign in here.', confirm: 'Forget' });
+    const ok = await confirmDialog({ title: 'Forget your Account Key on this device?', body: 'Your passkeys will be removed from this device, and you’ll need your Emergency Kit the next time you sign in here.', confirm: 'Forget' });
     if (!ok) return;
     await forgetDevice();
     await reload();
     toast('This device no longer remembers your Account Key');
   };
-  const protect = async () => { await offerPasskeySetup(); await reload(); };
+  const add = async (another) => { await offerPasskeySetup({ another }); await reload(); };
+  const remove = async (p, last) => {
+    const ok = await confirmDialog({
+      title: `Remove this ${p.kind === 'security-key' ? 'security key' : 'passkey'}?`,
+      body: last
+        ? 'It’s the only one, so this device will also forget your Account Key. You’ll need your Emergency Kit to sign in here again.'
+        : 'It will no longer unlock rspm on this device. The others keep working.',
+      confirm: 'Remove', danger: last,
+    });
+    if (!ok) return;
+    await removePasskey(p.id);
+    await reload();
+    toast('Removed');
+  };
+  const quickBusy = signal(false);
+  const toggleQuick = async (on) => {
+    if (on) {
+      const ok = await confirmDialog({
+        title: 'Unlock without your password?',
+        body: 'On this device, your passkey alone will open your vault. Anyone who has this device and can pass its Face ID, Touch ID, PIN — or holds your security key — won’t need your password. Your password is still needed everywhere else.',
+        confirm: 'Turn on',
+      });
+      if (!ok) { await reload(); return; }
+    }
+    quickBusy.value = true;
+    try {
+      await setQuickUnlock(on);
+      toast(on ? 'Password-free unlock is on for this device' : 'Your password is required again');
+    } catch (e) { toast(e.message, { tone: 'danger' }); } finally { quickBusy.value = false; await reload(); }
+  };
 
-  return () => {
+  const keyRows = () => {
     const st = state.value;
     if (!st) return null;
-    if (st.passkey) {
-      return Row({
-        label: 'Remembered Account Key',
-        value: h('span', { class: 'status-ok' }, icon('shield', 14), `Protected by ${passkeyLabel(st.passkey)}`),
-        action: Button({ label: 'Forget', size: 'sm', onClick: forget }),
+    const passkeys = st.passkeys ?? (st.passkey ? [st.passkey] : []);
+    if (passkeys.length) {
+      const quick = signal(!!st.quick);
+      const toggle = Toggle({
+        checked: quick,
+        label: 'Unlock without your password',
+        hint: 'Like Face ID in other password managers: one touch opens your vault on this device. Off by default.',
       });
-    }
-    if (st.akey) {
+      toggle.addEventListener('change', () => toggleQuick(quick.peek()));
       return [
         Row({
-          label: 'Remembered Account Key',
-          value: 'Stored on this device without extra protection',
-          action: h('div', { class: 'button-row' },
-            canPasskey && prf.value !== false ? Button({ label: 'Protect…', icon: 'key', size: 'sm', onClick: protect }) : null,
-            Button({ label: 'Forget', size: 'sm', onClick: forget })),
+          label: 'Account Key',
+          value: h('span', { class: 'status-ok' }, icon('shield', 14), passkeys.length === 1 ? 'Protected by a passkey' : `Protected by ${passkeys.length} passkeys`),
+          action: Button({ label: 'Forget', size: 'sm', onClick: forget }),
         }),
+        h('ul', { class: 'passkey-list' }, passkeys.map((p) => h('li', { class: 'passkey-row' },
+          h('span', { class: 'passkey-row-icon' }, icon(p.kind === 'security-key' ? 'key' : 'shield', 16)),
+          h('div', { class: 'passkey-row-text' }, h('div', { class: 'passkey-row-name' }, kindLabel(p.kind)), h('div', { class: 'muted small' }, added(p))),
+          st.passkeys ? Button({ label: 'Remove', kind: 'ghost', size: 'sm', onClick: () => remove(p, passkeys.length === 1) }) : null))),
+        () => (canAdd() && st.passkeys ? h('div', null, Button({ label: 'Add a passkey or security key', icon: 'plus', size: 'sm', onClick: () => add(true) })) : null),
+        st.passkeys
+          ? h('div', { class: () => ['quick-toggle', quickBusy.value && 'is-busy'] }, toggle)
+          : h('p', { class: 'muted small' }, 'Sign out and unlock once with your passkey to manage it here.'),
       ];
     }
+    if (st.akey) {
+      return Row({
+        label: 'Account Key',
+        value: 'Stored on this device without extra protection',
+        action: h('div', { class: 'button-row' },
+          () => (canAdd() ? Button({ label: 'Protect…', icon: 'key', size: 'sm', onClick: () => add(false) }) : null),
+          Button({ label: 'Forget', size: 'sm', onClick: forget })),
+      });
+    }
     return Row({
-      label: 'Remembered Account Key',
-      value: 'You enter your Account Key each time you sign in here',
-      action: h('div', { class: 'button-row' },
-        canPasskey && prf.value !== false ? Button({ label: 'Remember with passkey…', icon: 'key', size: 'sm', onClick: protect }) : null),
+      label: 'Account Key',
+      value: 'You enter it each time you sign in here',
+      action: () => (canAdd() ? Button({ label: 'Remember with passkey…', icon: 'key', size: 'sm', onClick: () => add(false) }) : null),
     });
   };
+
+  const lockSel = signal(String(lockMinutes.peek()));
+  const select = Select({ value: lockSel, options: LOCK_OPTIONS });
+  select.addEventListener('change', () => setLockMinutes(select.value));
+  const hide = signal(lockOnHide.peek());
+  const hideToggle = Toggle({ checked: hide, label: 'Also lock when rspm goes to the background', hint: 'Switching apps or tabs, or locking your screen, locks the vault.' });
+  hideToggle.addEventListener('change', () => setLockOnHide(hide.peek()));
+
+  return Section({
+    title: 'Unlocking',
+    description: 'How this device remembers your Account Key and when it locks. Your Emergency Kit works everywhere regardless.',
+    children: [
+      keyRows,
+      Row({ label: 'Lock automatically', value: 'When you haven’t used rspm for', action: select }),
+      hideToggle,
+    ],
+  });
 }
-return { deviceState, offerPasskeySetup, DeviceRows };
+return { offerPasskeySetup, UnlockSection };
 })();
 
 // app/src/views/auth.js
-const $m23 = (() => {
+const $m24 = (() => {
 // Sign in and vault creation.
 
 const { h, signal, effect, when, computed } = $m0;
 const { icon } = $m1;
 const { Button, Field, Input, PasswordInput, Toggle, Notice, Progress, copy, confirmDialog, id } = $m2;
-const { signIn, createAccount, deviceRecord, lastUsername, SignInError } = $m16;
+const { signIn, createAccount, deviceRecord, lastUsername, remembersKey, quickUnlock, SignInError } = $m16;
 const { printKit, kitText, download } = $m18;
 const { generatePassphrase } = $m20;
 const { StrengthMeter, strongEnough } = $m21;
 const { generateAccountKey, parseAccountKey, AccountKeyError } = $m12;
 const { RollbackError } = $m14;
 const { passkeysAvailable, prfSupported, passkeyLabel } = $m15;
-const { offerPasskeySetup } = $m22;
+const { offerPasskeySetup } = $m23;
 function Brand() {
   return h('div', { class: 'brand' },
     h('span', { class: 'brand-mark' }, icon('lock', 18)),
@@ -2917,6 +3161,7 @@ function SignIn({ onCreate, notice }) {
   const protect = signal(true);
   const device = signal(null);
   const useOtherKey = signal(false);
+  const usePassword = signal(false);
   const busy = signal(false);
   const step = signal('');
   const error = signal(null);
@@ -2929,11 +3174,14 @@ function SignIn({ onCreate, notice }) {
     const mine = ++seq;
     deviceRecord(u).then((r) => { if (mine === seq) device.value = r; });
   });
-  const hasDeviceKey = () => !!(device.value?.akey || device.value?.passkey) && !useOtherKey.value;
+  const hasDeviceKey = () => remembersKey(device.value) && !useOtherKey.value;
+  // Password-free unlock: the passkey alone opens the vault on this device.
+  const quick = () => hasDeviceKey() && quickUnlock(device.value) && !usePassword.value;
 
   const submit = async (allowRollback = false) => {
     error.value = null;
-    if (!username.peek().trim() || !password.peek()) { error.value = 'Enter your username and password'; return; }
+    if (!username.peek().trim()) { error.value = 'Enter your username'; return; }
+    if (!quick() && !password.peek()) { error.value = 'Enter your password'; return; }
     let key = null;
     if (!hasDeviceKey()) {
       try { key = await parseAccountKey(keyText.peek()); } catch (e) {
@@ -2945,7 +3193,7 @@ function SignIn({ onCreate, notice }) {
     busy.value = true;
     try {
       await signIn({
-        username: username.peek(), password: password.peek(), accountKey: key,
+        username: username.peek(), password: quick() ? '' : password.peek(), accountKey: key,
         // With passkey protection the key is stored only after the passkey is set up.
         rememberKey: key ? rememberKey.peek() && !wantPasskey : undefined, allowRollback,
       }, (s) => { step.value = s; });
@@ -2977,17 +3225,21 @@ function SignIn({ onCreate, notice }) {
         h('p', { class: 'auth-subtitle' }, 'Enter the three things only you know.')),
       notice,
       Field({ label: 'Username', id: fid.u, children: Input({ value: username, id: fid.u, autocomplete: 'username', autofocus: true }) }),
-      Field({ label: 'Password', id: fid.p, children: PasswordInput({ value: password, id: fid.p, autocomplete: 'current-password' }) }),
+      () => (quick() ? null : Field({ label: 'Password', id: fid.p, children: PasswordInput({ value: password, id: fid.p, autocomplete: 'current-password' }) })),
       () => (hasDeviceKey()
         ? h('div', { class: 'remembered-key' },
-          icon(device.value.passkey ? 'shield' : 'key', 16),
-          h('span', null, device.value.passkey ? `Account Key protected by ${passkeyLabel(device.value.passkey)}` : 'Account Key remembered on this device'),
-          h('button', { type: 'button', class: 'link', on: { click: () => { useOtherKey.value = true; } } }, 'Use a different key'))
+          icon(device.value.akey ? 'key' : 'shield', 16),
+          h('span', null, device.value.akey
+            ? 'Account Key remembered on this device'
+            : quick() ? `Unlocks with ${passkeyLabel(device.value.passkeys)}` : `Account Key protected by ${passkeyLabel(device.value.passkeys ?? device.value.passkey)}`),
+          quickUnlock(device.value)
+            ? h('button', { type: 'button', class: 'link', on: { click: () => { usePassword.value = !usePassword.value; } } }, () => (usePassword.value ? 'Use passkey only' : 'Use password'))
+            : h('button', { type: 'button', class: 'link', on: { click: () => { useOtherKey.value = true; } } }, 'Use a different key'))
         : h('div', { class: 'stack-sm' },
           Field({ label: 'Account Key', id: fid.k, hint: 'From your Emergency Kit. Starts with RSPM1-.', children: Input({ value: keyText, id: fid.k, mono: true, placeholder: 'RSPM1-XXXX-XXXX-…' }) }),
           RememberToggles({ rememberKey, protect, offer }))),
       () => (error.value ? Notice({ tone: 'danger', title: error.value }) : null),
-      Button({ label: () => (busy.value ? step.value || 'Unlocking…' : 'Unlock'), kind: 'primary', size: 'lg', type: 'submit', busy: () => busy.value }),
+      Button({ label: () => (busy.value ? step.value || 'Unlocking…' : quick() ? 'Unlock with passkey' : 'Unlock'), kind: 'primary', size: 'lg', type: 'submit', busy: () => busy.value }),
       h('div', { class: 'auth-switch' }, 'New to rspm? ', h('button', { type: 'button', class: 'link', on: { click: onCreate } }, 'Create a vault')),
       AuthFooter()));
 }
@@ -3110,7 +3362,7 @@ return { SignIn, CreateVault };
 })();
 
 // core/totp.js
-const $m24 = (() => {
+const $m25 = (() => {
 // RFC 6238 TOTP / RFC 4226 HOTP, and otpauth:// URIs.
 
 const ALGS = { SHA1: 'SHA-1', SHA256: 'SHA-256', SHA512: 'SHA-512' };
@@ -3172,14 +3424,14 @@ return { decodeSecret, parseOtpauth, hotp, totp };
 })();
 
 // app/src/views/item.js
-const $m25 = (() => {
+const $m26 = (() => {
 // Item types: detail views and editors.
 
 const { h, signal, effect, onCleanup, when, list, computed } = $m0;
 const { icon } = $m1;
 const { Button, IconButton, Field, Input, Textarea, PasswordInput, ValueRow, Monogram, Notice, Toggle, Segmented, copy, id, now, toast } = $m2;
 const { generatePassword, generatePassphrase, passwordBits, passphraseBits } = $m20;
-const { totp, parseOtpauth } = $m24;
+const { totp, parseOtpauth } = $m25;
 const TYPES = {
   login: { label: 'Login', plural: 'Logins', icon: 'login' },
   totp: { label: 'Two-factor code', plural: 'Two-factor', icon: 'clock' },
@@ -3435,7 +3687,7 @@ return { TYPES, subtitle, matches, TotpCode, ItemHeader, ItemFields, EnvTools, I
 })();
 
 // core/sha3.js
-const $m26 = (() => {
+const $m27 = (() => {
 // SHA3-256, SHA3-512, SHAKE128 and SHAKE256 (FIPS 202). Zero dependencies.
 //
 // The 1600-bit Keccak state is 25 lanes of 64 bits, stored as 50 Uint32 words:
@@ -3551,7 +3803,7 @@ return { Keccak, sha3_256, sha3_512, shake128, shake256 };
 })();
 
 // core/mlkem.js
-const $m27 = (() => {
+const $m28 = (() => {
 // ML-KEM-768 (FIPS 203). Zero dependencies.
 //
 //   keygen(seed64)       → { ek: 1184 B, dk: 2400 B }   seed64 = d ‖ z (Go's NewDecapsulationKey768 seed)
@@ -3567,7 +3819,7 @@ const $m27 = (() => {
 // time (avoiding the integer-division leak known as KyberSlash). JS gives no
 // hard constant-time guarantees; this is best effort.
 
-const { sha3_256, sha3_512, shake256, Keccak } = $m26;
+const { sha3_256, sha3_512, shake256, Keccak } = $m27;
 const N = 256, Q = 3329, K = 3, ETA1 = 2, ETA2 = 2, DU = 10, DV = 4;
 const EK_BYTES = 384 * K + 32;                  // 1184
 const DK_BYTES = 768 * K + 96;                  // 2400
@@ -3832,13 +4084,13 @@ return { EK_BYTES, DK_BYTES, CT_BYTES, SEED_BYTES, checkEncapsulationKey, checkD
 })();
 
 // core/share.js
-const $m28 = (() => {
+const $m29 = (() => {
 // Sharing and public handles (PROTOCOL §8).
 
 const { b32, b32decode, b64, b64decode, concat, equal, fromUtf8, u32be, utf8 } = $m4;
 const { aesKey, deflate, hkdf, inflate, random, sha256, x25519, x25519Generate } = $m5;
 const { TYPE, chunk, locate, openBlock, sealBlock, BLOCK } = $m13;
-const mlkem = $m27;
+const mlkem = $m28;
 const { pool } = $m10;
 const MAX_HOURS = 720;
 const LINK_ORIGIN = 'https://rspm.link';
@@ -4071,15 +4323,15 @@ return { MAX_HOURS, LINK_ORIGIN, ShareError, createLinkShare, normalizeHandle, h
 })();
 
 // app/src/views/share.js
-const $m29 = (() => {
+const $m30 = (() => {
 // Share dialog, active shares, and the "shared with you" page.
 
 const { h, signal, when, list } = $m0;
 const { icon } = $m1;
 const { Button, Field, Input, Segmented, Select, Toggle, Notice, DialogHeader, openDialog, copy, toast, relativeHours, Empty, IconButton, confirmDialog } = $m2;
 const { session, store, save, config } = $m16;
-const { ItemFields, TYPES } = $m25;
-const { createLinkShare, createRecipientShare, lookupHandle, openShare, deleteShare, normalizeHandle } = $m28;
+const { ItemFields, TYPES } = $m26;
+const { createLinkShare, createRecipientShare, lookupHandle, openShare, deleteShare, normalizeHandle } = $m29;
 const { putItem } = $m14;
 const EXPIRY = [['1', '1 hour'], ['24', '1 day'], ['168', '7 days'], ['720', '30 days']];
 
@@ -4257,26 +4509,23 @@ return { openShareDialog, SharesPage, ReceivedShare };
 })();
 
 // app/src/views/settings.js
-const $m30 = (() => {
+const $m31 = (() => {
 // Settings: account, device, handle, backup, credentials, about.
 
-const { h, signal, when } = $m0;
+const { h, signal } = $m0;
 const { icon } = $m1;
-const { Button, Field, Input, PasswordInput, Select, Toggle, Notice, DialogHeader, openDialog, copy, toast, confirmDialog, Progress } = $m2;
+const { Button, Field, Input, PasswordInput, Toggle, Notice, DialogHeader, openDialog, copy, toast, confirmDialog, Progress } = $m2;
 const { session, store, save, config, replaceVault, lock } = $m16;
-const { DeviceRows } = $m22;
+const { UnlockSection } = $m23;
 const { printKit, download } = $m18;
 const idb = $m3;
 const { formatAccountKey, deriveKeys, generateAccountKey, salt } = $m12;
-const { createIdentity, publishHandle, unpublishHandle, lookupHandle, fingerprint, normalizeHandle } = $m28;
+const { createIdentity, publishHandle, unpublishHandle, lookupHandle, fingerprint, normalizeHandle } = $m29;
 const { b64, b64decode, equal, utf8, fromUtf8, hex } = $m4;
 const { aesKey, hkdf, seal, open, random } = $m5;
 const { merge } = $m14;
-const mlkem = $m27;
+const mlkem = $m28;
 const { StrengthMeter, strongEnough } = $m21;
-const lockMinutes = signal(10);
-idb.get('lock-minutes').then((m) => { if (m) lockMinutes.value = m; });
-
 function Section({ title, description, children }) {
   return h('section', { class: 'settings-section' },
     h('div', { class: 'settings-section-head' }, h('h2', null, title), description && h('p', { class: 'muted small' }, description)),
@@ -4351,12 +4600,11 @@ function changeCredentials() {
         const keys = await deriveKeys(username.peek(), pw.peek(), key);
         const fresh = await s.vault.rekey(keys, (d, t) => { progress.value = d / t; });
         const rec = await idb.get(`device:${s.saltHex}`);
-        const sameAccount = hex(await salt(username.peek())) === s.saltHex && key === s.accountKey;
-        // A passkey wraps this exact key under this exact username. If either changed, never fall
-        // back to storing the new key unprotected — forget it and ask for a fresh passkey instead.
-        const rememberKey = sameAccount ? undefined : rec?.passkey ? false : rec?.akey ? true : undefined;
-        await replaceVault(username.peek(), fresh, key, rememberKey);
-        if (rec?.passkey && !sameAccount) toast('Set up your passkey again in Settings → This device', { ms: 6000 });
+        const sameUser = hex(await salt(username.peek())) === s.saltHex;
+        // Passkeys wrap keys bound to this username. With a new username, never fall back to
+        // storing the key unprotected — forget it and ask for a fresh passkey instead.
+        await replaceVault(username.peek(), fresh, key, !!rec?.akey);
+        if (!sameUser && (rec?.passkeys?.length || rec?.passkey)) toast('Add your passkeys again in Settings → Unlocking', { ms: 6000 });
         if (rotate.peek()) newKey.value = await formatAccountKey(key);
         else { toast('Credentials changed'); close(); }
       } catch (e) {
@@ -4476,8 +4724,6 @@ function HandleSection() {
 
 function SettingsPage({ back }) {
   const s = session.peek();
-  const lockSel = signal(String(lockMinutes.peek()));
-  const setLock = (v) => { lockMinutes.value = Number(v); idb.set('lock-minutes', Number(v)); };
 
   return h('div', { class: 'page' },
     h('header', { class: 'page-header' }, back, h('div', null, h('h1', { class: 'page-title' }, 'Settings'))),
@@ -4491,16 +4737,7 @@ function SettingsPage({ back }) {
       ],
     }),
 
-    Section({
-      title: 'This device',
-      children: [
-        DeviceRows({ Row }),
-        Row({
-          label: 'Lock automatically',
-          action: (() => { const el = Select({ value: lockSel, options: [['1', 'After 1 minute'], ['5', 'After 5 minutes'], ['10', 'After 10 minutes'], ['30', 'After 30 minutes'], ['60', 'After 1 hour']] }); el.addEventListener('change', () => setLock(el.value)); return el; })(),
-        }),
-      ],
-    }),
+    UnlockSection({ Section, Row }),
 
     HandleSection(),
 
@@ -4526,20 +4763,20 @@ function SettingsPage({ back }) {
 
     h('div', { class: 'settings-footer' }, Button({ label: 'Lock now', icon: 'lock', onClick: lock })));
 }
-return { lockMinutes, SettingsPage };
+return { SettingsPage };
 })();
 
 // app/src/views/vault.js
-const $m31 = (() => {
+const $m32 = (() => {
 // The unlocked vault: sidebar, item list, and detail pane.
 
 const { h, signal, computed, when, list, onCleanup, untrack } = $m0;
 const { icon } = $m1;
 const { Button, IconButton, Monogram, Empty, Notice, confirmDialog, toast } = $m2;
 const { session, doc, saving, save, lock, refresh } = $m16;
-const { TYPES, subtitle, matches, ItemHeader, ItemFields, ItemEditor, TotpCode, EnvTools } = $m25;
-const { openShareDialog, SharesPage } = $m29;
-const { SettingsPage } = $m30;
+const { TYPES, subtitle, matches, ItemHeader, ItemFields, ItemEditor, TotpCode, EnvTools } = $m26;
+const { openShareDialog, SharesPage } = $m30;
+const { SettingsPage } = $m31;
 const { putItem, removeItem } = $m14;
 const FILTERS = [
   ['all', 'All items', 'layers'],
@@ -4697,19 +4934,19 @@ return { VaultView };
 })();
 
 // app/src/main.js
-const $m32 = (() => {
+const $m33 = (() => {
 // Entry point.
 
 const { h, signal, mount, untrack, effect } = $m0;
 const { icon } = $m1;
 const { ToastHost, Button, Notice } = $m2;
-const { session, lock } = $m16;
+const { session } = $m16;
 const { buildHash, pendingUpdate } = $m17;
-const { SignIn, CreateVault } = $m23;
-const { VaultView } = $m31;
-const { ReceivedShare } = $m29;
-const { lockMinutes } = $m30;
-const { parseShareFragment } = $m28;
+const { SignIn, CreateVault } = $m24;
+const { VaultView } = $m32;
+const { ReceivedShare } = $m30;
+const { startAutoLock } = $m22;
+const { parseShareFragment } = $m29;
 const screen = signal('signin');
 // Once signed in, the next locked screen is always sign-in — never back to vault creation.
 effect(() => { if (session.value) screen.value = 'signin'; });
@@ -4764,15 +5001,7 @@ function UpdateBanner() {
   };
 }
 
-// ── Auto-lock ───────────────────────────────────────────────────────────────
-
-let lastActive = Date.now();
-for (const ev of ['pointerdown', 'keydown', 'wheel', 'touchstart']) {
-  window.addEventListener(ev, () => { lastActive = Date.now(); }, { passive: true, capture: true });
-}
-setInterval(() => {
-  if (session.peek() && Date.now() - lastActive > lockMinutes.peek() * 60000) lock();
-}, 5000);
+startAutoLock();
 
 // ── Service worker (installed PWA) ──────────────────────────────────────────
 

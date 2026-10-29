@@ -3,12 +3,12 @@
 import { h, signal, mount, untrack, effect } from './ui.js';
 import { icon } from './icons.js';
 import { ToastHost, Button, Notice } from './components.js';
-import { session, lock } from './session.js';
+import { session } from './session.js';
 import { buildHash, pendingUpdate } from './build-info.js';
 import { SignIn, CreateVault } from './views/auth.js';
 import { VaultView } from './views/vault.js';
 import { ReceivedShare } from './views/share.js';
-import { lockMinutes } from './views/settings.js';
+import { startAutoLock } from './lock.js';
 import { parseShareFragment } from '../../core/share.js';
 
 const screen = signal('signin');
@@ -65,15 +65,7 @@ function UpdateBanner() {
   };
 }
 
-// ── Auto-lock ───────────────────────────────────────────────────────────────
-
-let lastActive = Date.now();
-for (const ev of ['pointerdown', 'keydown', 'wheel', 'touchstart']) {
-  window.addEventListener(ev, () => { lastActive = Date.now(); }, { passive: true, capture: true });
-}
-setInterval(() => {
-  if (session.peek() && Date.now() - lastActive > lockMinutes.peek() * 60000) lock();
-}, 5000);
+startAutoLock();
 
 // ── Service worker (installed PWA) ──────────────────────────────────────────
 

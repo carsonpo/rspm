@@ -3,7 +3,7 @@
 import { h, signal, effect, when, computed } from '../ui.js';
 import { icon } from '../icons.js';
 import { Button, Field, Input, PasswordInput, Toggle, Notice, Progress, copy, confirmDialog, id } from '../components.js';
-import { signIn, createAccount, deviceRecord, lastUsername, SignInError } from '../session.js';
+import { signIn, createAccount, deviceRecord, lastUsername, remembersKey, quickUnlock, SignInError } from '../session.js';
 import { printKit, kitText, download } from '../kit.js';
 import { generatePassphrase } from '../generator.js';
 import { StrengthMeter, strongEnough } from './strength.js';
@@ -49,6 +49,7 @@ export function SignIn({ onCreate, notice }) {
   const protect = signal(true);
   const device = signal(null);
   const useOtherKey = signal(false);
+  const usePassword = signal(false);
   const busy = signal(false);
   const step = signal('');
   const error = signal(null);
@@ -61,11 +62,14 @@ export function SignIn({ onCreate, notice }) {
     const mine = ++seq;
     deviceRecord(u).then((r) => { if (mine === seq) device.value = r; });
   });
-  const hasDeviceKey = () => !!(device.value?.akey || device.value?.passkey) && !useOtherKey.value;
+  const hasDeviceKey = () => remembersKey(device.value) && !useOtherKey.value;
+  // Password-free unlock: the passkey alone opens the vault on this device.
+  const quick = () => hasDeviceKey() && quickUnlock(device.value) && !usePassword.value;
 
   const submit = async (allowRollback = false) => {
     error.value = null;
-    if (!username.peek().trim() || !password.peek()) { error.value = 'Enter your username and password'; return; }
+    if (!username.peek().trim()) { error.value = 'Enter your username'; return; }
+    if (!quick() && !password.peek()) { error.value = 'Enter your password'; return; }
     let key = null;
     if (!hasDeviceKey()) {
       try { key = await parseAccountKey(keyText.peek()); } catch (e) {
@@ -77,7 +81,7 @@ export function SignIn({ onCreate, notice }) {
     busy.value = true;
     try {
       await signIn({
-        username: username.peek(), password: password.peek(), accountKey: key,
+        username: username.peek(), password: quick() ? '' : password.peek(), accountKey: key,
         // With passkey protection the key is stored only after the passkey is set up.
         rememberKey: key ? rememberKey.peek() && !wantPasskey : undefined, allowRollback,
       }, (s) => { step.value = s; });
@@ -109,17 +113,21 @@ export function SignIn({ onCreate, notice }) {
         h('p', { class: 'auth-subtitle' }, 'Enter the three things only you know.')),
       notice,
       Field({ label: 'Username', id: fid.u, children: Input({ value: username, id: fid.u, autocomplete: 'username', autofocus: true }) }),
-      Field({ label: 'Password', id: fid.p, children: PasswordInput({ value: password, id: fid.p, autocomplete: 'current-password' }) }),
+      () => (quick() ? null : Field({ label: 'Password', id: fid.p, children: PasswordInput({ value: password, id: fid.p, autocomplete: 'current-password' }) })),
       () => (hasDeviceKey()
         ? h('div', { class: 'remembered-key' },
-          icon(device.value.passkey ? 'shield' : 'key', 16),
-          h('span', null, device.value.passkey ? `Account Key protected by ${passkeyLabel(device.value.passkey)}` : 'Account Key remembered on this device'),
-          h('button', { type: 'button', class: 'link', on: { click: () => { useOtherKey.value = true; } } }, 'Use a different key'))
+          icon(device.value.akey ? 'key' : 'shield', 16),
+          h('span', null, device.value.akey
+            ? 'Account Key remembered on this device'
+            : quick() ? `Unlocks with ${passkeyLabel(device.value.passkeys)}` : `Account Key protected by ${passkeyLabel(device.value.passkeys ?? device.value.passkey)}`),
+          quickUnlock(device.value)
+            ? h('button', { type: 'button', class: 'link', on: { click: () => { usePassword.value = !usePassword.value; } } }, () => (usePassword.value ? 'Use passkey only' : 'Use password'))
+            : h('button', { type: 'button', class: 'link', on: { click: () => { useOtherKey.value = true; } } }, 'Use a different key'))
         : h('div', { class: 'stack-sm' },
           Field({ label: 'Account Key', id: fid.k, hint: 'From your Emergency Kit. Starts with RSPM1-.', children: Input({ value: keyText, id: fid.k, mono: true, placeholder: 'RSPM1-XXXX-XXXX-…' }) }),
           RememberToggles({ rememberKey, protect, offer }))),
       () => (error.value ? Notice({ tone: 'danger', title: error.value }) : null),
-      Button({ label: () => (busy.value ? step.value || 'Unlocking…' : 'Unlock'), kind: 'primary', size: 'lg', type: 'submit', busy: () => busy.value }),
+      Button({ label: () => (busy.value ? step.value || 'Unlocking…' : quick() ? 'Unlock with passkey' : 'Unlock'), kind: 'primary', size: 'lg', type: 'submit', busy: () => busy.value }),
       h('div', { class: 'auth-switch' }, 'New to rspm? ', h('button', { type: 'button', class: 'link', on: { click: onCreate } }, 'Create a vault')),
       AuthFooter()));
 }

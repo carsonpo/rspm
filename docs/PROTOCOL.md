@@ -536,32 +536,72 @@ Restoring merges the backup into the current document using the rules in §6.6.
 
 ### 10.2 Passkey-protected Account Key
 
-The device can keep the Account Key encrypted under a secret that only a
-WebAuthn authenticator releases after user verification: Touch ID, Face ID,
-Windows Hello, or a FIDO2 security key such as a YubiKey. This uses the
-WebAuthn **PRF** extension (CTAP2 `hmac-secret`). Nothing here involves a
-server. Assertions are never sent anywhere; only the PRF output is used,
-locally.
+The device can keep the Account Key encrypted under secrets that only WebAuthn
+authenticators release after user verification: Touch ID, Face ID, Windows
+Hello, or a FIDO2 security key such as a YubiKey. This uses the WebAuthn
+**PRF** extension (CTAP2 `hmac-secret`). Several authenticators can be
+registered, and any one of them unlocks. Nothing here involves a server.
+Assertions are never sent anywhere; only the PRF output is used, locally.
 
-Registration:
+All three layers use the same construction, differing only in `info` and `label`:
 
 ```
-rp.id           = the app's hostname
-user            = { id: 16 random bytes, name: "rspm Account Key" }   // never the username
+lock(secret, info, label, data) = { nonce, ct = AES-256-GCM(HKDF(secret, "rspm/v1", info, 32), nonce, data,
+                                                            aad = "rspm/v1/" ‖ label ‖ hex(salt)) }
+```
+
+The AAD binds every record to one account through the §3.3 salt.
+
+The device record (§10) holds:
+
+```
+prf_salt   = 32 random bytes, shared by all of this record's authenticators
+DK         = 32 random bytes (the device key; never stored in the clear)
+passkeys[] = { id, kind, created, lock(PRF(credential, prf_salt), "device-wrap",   "device-key",     DK) }
+dk         =                      lock(enc_key,                    "device-escrow", "device-escrow",  DK)
+sealed     =                      lock(DK,                         "device-secrets","device-secrets", K [‖ loc_key ‖ enc_key])
+quick      = whether `sealed` includes the vault keys
+```
+
+Registration of each authenticator:
+
+```
+rp.id            = the app's hostname
+user             = { id: 16 random bytes, name: "rspm Account Key" }   // never the username
 userVerification = required, residentKey = discouraged, attestation = none
-prf_salt        = 32 random bytes
-prf             = PRF(credential, prf_salt)          // at registration, or by a follow-up assertion
-wrap_key        = HKDF(prf, "rspm/v1", "device-wrap", 32)
-record          = { id, salt: prf_salt, kind, nonce, ct = AES-256-GCM(wrap_key, nonce, K, aad = "rspm/v1/device" ‖ hex(salt)) }
+excludeCredentials = the record's existing credential ids
+prf              = PRF(credential, prf_salt)   // at registration, or by a follow-up assertion
 ```
 
-The record replaces the plaintext key in the device entry. To unlock, the
-client asks for an assertion with `allowCredentials = [id]` and
-`prf.eval.first = prf_salt`, then derives `wrap_key` and decrypts `K`. The AAD
-binds the record to one account (via the §3.3 salt). The password is still
-required: the passkey only replaces typing the Account Key on this device. If
-the credential or username changes, the record is discarded rather than
-falling back to storing `K` unprotected.
+To unlock, the client asks for one assertion with `allowCredentials` set to
+every registered id and `prf.eval.first = prf_salt`. It takes the record whose
+id answered, unwraps `DK` with that authenticator's PRF output, and opens
+`sealed`.
+
+- If `sealed` holds only `K` (16 bytes), the password is still required. The
+  passkey replaces typing the Account Key on this device.
+- **Password-free unlock** (opt-in): `sealed` also holds `loc_key ‖ enc_key`
+  (80 bytes in total). The client opens the vault with those keys directly, skipping
+  Argon2id. The password itself is never stored.
+
+The `dk` escrow lets an unlocked session recover `DK` without any
+authenticator. Adding a passkey, or switching password-free unlock on or off,
+therefore needs a touch only from the new authenticator. `dk` gives nothing
+that `enc_key` doesn't already give.
+
+Changing credentials:
+- **Same username:** the client re-escrows `DK` under the new `enc_key` and
+  reseals `sealed`. Passkeys stay registered.
+- **New username:** the record is discarded, never downgraded to storing `K`
+  unprotected.
+
+Removing the last passkey forgets `K` on the device. Removing a passkey only
+deletes its wrapped copy of `DK`. Revoking a lost authenticator against someone
+who copied the device's storage earlier requires changing credentials (§7).
+
+Version 1 records (`passkey = { id, salt, kind, nonce, ct }`, which wrap `K`
+directly with `aad = "rspm/v1/device" ‖ hex(salt)`) are still read. They are
+upgraded to the format above the first time they unlock.
 
 ## 11. What an observer of the public bucket learns
 

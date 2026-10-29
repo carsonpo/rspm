@@ -1,10 +1,10 @@
 // Settings: account, device, handle, backup, credentials, about.
 
-import { h, signal, when } from '../ui.js';
+import { h, signal } from '../ui.js';
 import { icon } from '../icons.js';
-import { Button, Field, Input, PasswordInput, Select, Toggle, Notice, DialogHeader, openDialog, copy, toast, confirmDialog, Progress } from '../components.js';
+import { Button, Field, Input, PasswordInput, Toggle, Notice, DialogHeader, openDialog, copy, toast, confirmDialog, Progress } from '../components.js';
 import { session, store, save, config, replaceVault, lock } from '../session.js';
-import { DeviceRows } from './device.js';
+import { UnlockSection } from './device.js';
 import { printKit, download } from '../kit.js';
 import * as idb from '../idb.js';
 import { formatAccountKey, deriveKeys, generateAccountKey, salt } from '../../../core/kdf.js';
@@ -14,9 +14,6 @@ import { aesKey, hkdf, seal, open, random } from '../../../core/crypto.js';
 import { merge } from '../../../core/vault.js';
 import * as mlkem from '../../../core/mlkem.js';
 import { StrengthMeter, strongEnough } from './strength.js';
-
-export const lockMinutes = signal(10);
-idb.get('lock-minutes').then((m) => { if (m) lockMinutes.value = m; });
 
 function Section({ title, description, children }) {
   return h('section', { class: 'settings-section' },
@@ -92,12 +89,11 @@ function changeCredentials() {
         const keys = await deriveKeys(username.peek(), pw.peek(), key);
         const fresh = await s.vault.rekey(keys, (d, t) => { progress.value = d / t; });
         const rec = await idb.get(`device:${s.saltHex}`);
-        const sameAccount = hex(await salt(username.peek())) === s.saltHex && key === s.accountKey;
-        // A passkey wraps this exact key under this exact username. If either changed, never fall
-        // back to storing the new key unprotected — forget it and ask for a fresh passkey instead.
-        const rememberKey = sameAccount ? undefined : rec?.passkey ? false : rec?.akey ? true : undefined;
-        await replaceVault(username.peek(), fresh, key, rememberKey);
-        if (rec?.passkey && !sameAccount) toast('Set up your passkey again in Settings → This device', { ms: 6000 });
+        const sameUser = hex(await salt(username.peek())) === s.saltHex;
+        // Passkeys wrap keys bound to this username. With a new username, never fall back to
+        // storing the key unprotected — forget it and ask for a fresh passkey instead.
+        await replaceVault(username.peek(), fresh, key, !!rec?.akey);
+        if (!sameUser && (rec?.passkeys?.length || rec?.passkey)) toast('Add your passkeys again in Settings → Unlocking', { ms: 6000 });
         if (rotate.peek()) newKey.value = await formatAccountKey(key);
         else { toast('Credentials changed'); close(); }
       } catch (e) {
@@ -217,8 +213,6 @@ function HandleSection() {
 
 export function SettingsPage({ back }) {
   const s = session.peek();
-  const lockSel = signal(String(lockMinutes.peek()));
-  const setLock = (v) => { lockMinutes.value = Number(v); idb.set('lock-minutes', Number(v)); };
 
   return h('div', { class: 'page' },
     h('header', { class: 'page-header' }, back, h('div', null, h('h1', { class: 'page-title' }, 'Settings'))),
@@ -232,16 +226,7 @@ export function SettingsPage({ back }) {
       ],
     }),
 
-    Section({
-      title: 'This device',
-      children: [
-        DeviceRows({ Row }),
-        Row({
-          label: 'Lock automatically',
-          action: (() => { const el = Select({ value: lockSel, options: [['1', 'After 1 minute'], ['5', 'After 5 minutes'], ['10', 'After 10 minutes'], ['30', 'After 30 minutes'], ['60', 'After 1 hour']] }); el.addEventListener('change', () => setLock(el.value)); return el; })(),
-        }),
-      ],
-    }),
+    UnlockSection({ Section, Row }),
 
     HandleSection(),
 

@@ -51,11 +51,19 @@ password still holds; a weak one won't. This is why the password and the
 Emergency Kit must be stored separately.
 
 A device that remembers the Account Key with **passkey protection**
-(PROTOCOL §10.2) stores it encrypted under a secret held by the platform
-authenticator or security key. Someone who copies the browser's storage gets
-ciphertext. They also need the user's fingerprint, face, PIN or physical key,
-and still the password. A key remembered *without* passkey protection can be
-read by anyone with access to the browser profile.
+(PROTOCOL §10.2) stores it encrypted under secrets held by the registered
+platform authenticators or security keys. Someone who copies the browser's
+storage gets ciphertext. They also need the user's fingerprint, face, PIN or
+physical key, and still the password. A key remembered *without* passkey
+protection can be read by anyone with access to the browser profile.
+
+With **password-free unlock** (opt-in, per device), the device seals the vault
+keys too. Storage plus any one registered authenticator then opens the vault
+without the password. On that device, security reduces to the authenticator's
+user verification: a phone's Face ID or passcode, or a security key's PIN. This
+is the same trade-off other password managers make for biometric unlock. The
+password itself is never stored, so it stays safe even if it's reused
+elsewhere. Other devices are unaffected.
 
 ### A3. Operator, or Cloudflare, watching the hosted instance
 **Learns, in addition to A1:** the client IP and timing of each read and write,
@@ -140,6 +148,10 @@ through, at a CPU cost per 4 KiB. The client tag (§9.3) is a nuisance filter,
   tested against official vectors and differentially against a pinned
   reference implementation (Go's `crypto/mlkem`, `crypto/sha3`,
   `x/crypto/argon2`). An external audit is planned before 1.0.
+- **R12. Password-free unlock** (A2). On a device where it's turned on, a thief
+  who can pass the device's biometric or passcode check, or who holds a
+  registered security key and its PIN, can open the vault without the password.
+  It's off by default, and the app explains the trade-off before turning it on.
 
 ## User responsibilities
 

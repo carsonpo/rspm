@@ -588,3 +588,12 @@ code { background: var(--surface-2); padding: 0.1em 0.35em; border-radius: var(-
   .print-kit .key { font: 600 14pt/1.6 var(--mono); letter-spacing: 0.05em; }
   .print-kit .blank { color: #555; }
 }
+
+/* Passkeys (Settings → Unlocking) */
+.passkey-list { list-style: none; margin: 0; padding: 0; border: 1px solid var(--border); border-radius: var(--r); }
+.passkey-row { display: flex; align-items: center; gap: var(--s3); padding: var(--s2) var(--s3); min-height: 52px; }
+.passkey-row + .passkey-row { border-top: 1px solid var(--border); }
+.passkey-row-icon { display: grid; place-items: center; flex: none; width: 32px; height: 32px; border-radius: var(--r-sm); background: var(--accent-soft); color: var(--accent-text); }
+.passkey-row-text { flex: 1; min-width: 0; }
+.passkey-row-name { font-weight: 540; }
+.quick-toggle.is-busy { opacity: 0.6; pointer-events: none; }
