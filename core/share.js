@@ -60,10 +60,21 @@ async function readEnvelope(store, s, hour) {
   return { meta, payload: JSON.parse(fromUtf8(await inflate(raw))) };
 }
 
-async function deleteEnvelope(store, s, hour, n) {
+async function envelopeRefs(s, hour, n) {
   const keys = await envelopeKeys(s);
-  const refs = await Promise.all(Array.from({ length: n + 1 }, (_, i) => shareRef(keys, hour, i)));
-  await pool(refs, 6, (r) => store.del(r.path, r.token).catch(() => false));
+  return Promise.all(Array.from({ length: n + 1 }, (_, i) => shareRef(keys, hour, i)));
+}
+
+/**
+ * Deletes every ref, attempting all of them even if some fail, then throws if
+ * any failed. Already-missing objects count as deleted, so retrying is safe.
+ */
+async function deleteAll(store, refs) {
+  const errors = [];
+  await pool(refs, 6, (r) => store.del(r.path, r.token).catch((err) => { errors.push(err); }));
+  if (errors.length) {
+    throw new ShareError(`${errors.length} of ${refs.length} parts of the share couldn’t be deleted from the server (${errors[0].message}). Try again.`);
+  }
 }
 
 function checkHours(hours) {
@@ -110,12 +121,18 @@ function identityKeys(identity) {
   return { xsk: b64decode(identity.x25519_sk), xpk: b64decode(identity.x25519_pk), ek, dk };
 }
 
-const handleToken = (locKey, handle) => locate(locKey, concat(utf8('handle'), utf8(handle)));
+/**
+ * The handle's delete/replace token, derived from the identity's own secrets
+ * so it moves with the identity through credential changes (§8.3.1).
+ */
+const handleToken = (identity) => hkdf(concat(b64decode(identity.x25519_sk), b64decode(identity.mlkem_seed)), 'rspm/v1', 'handle-token');
+/** Version 1 records derived the token from the vault's location key instead. */
+const legacyHandleToken = async (locKey, handle) => (await locate(locKey, concat(utf8('handle'), utf8(handle)))).token;
 
-export async function buildHandleRecord(identity, locKey) {
+export async function buildHandleRecord(identity) {
   const { xpk, ek } = identityKeys(identity);
   const name = utf8(identity.handle);
-  const { token } = await handleToken(locKey, identity.handle);
+  const token = await handleToken(identity);
   const rec = random(BLOCK);
   rec[0] = 0x01;
   rec.set(utf8('RSPMH1'), 1);
@@ -140,17 +157,34 @@ export function parseHandleRecord(rec) {
 }
 
 /** Publishes the identity's handle. Returns false if the handle is taken by someone else. */
-export async function publishHandle(store, identity, locKey) {
+export async function publishHandle(store, identity) {
   const path = await handlePath(identity.handle);
-  if (await store.put(path, await buildHandleRecord(identity, locKey))) return true;
+  if (await store.put(path, await buildHandleRecord(identity))) return true;
   // Already ours (e.g. published from another device)?
   const existing = parseHandleRecord(await store.get(path));
   return !!existing && equal(existing.xpk, b64decode(identity.x25519_pk));
 }
 
-export async function unpublishHandle(store, identity, locKey) {
-  const { token } = await handleToken(locKey, identity.handle);
-  return store.del(await handlePath(identity.handle), token);
+/**
+ * Moves a version 1 handle record (token derived from `locKey`) to the
+ * identity-derived token, replacing it atomically so the handle is never free.
+ * Returns 'current', 'migrated', 'missing', 'foreign' (not ours), or 'stale'
+ * (a version 1 record from credentials older than `locKey`, which can't be updated).
+ */
+export async function migrateHandle(store, identity, locKey) {
+  const path = await handlePath(identity.handle);
+  const rec = parseHandleRecord(await store.get(path));
+  if (!rec) return 'missing';
+  if (!equal(rec.xpk, b64decode(identity.x25519_pk))) return 'foreign';
+  if (equal(rec.verifier, await sha256(await handleToken(identity)))) return 'current';
+  const legacy = await legacyHandleToken(locKey, identity.handle);
+  if (!equal(rec.verifier, await sha256(legacy))) return 'stale';
+  if (!(await store.replace(path, await buildHandleRecord(identity), legacy))) throw new ShareError('The handle changed while updating it. Try again.');
+  return 'migrated';
+}
+
+export async function unpublishHandle(store, identity) {
+  return store.del(await handlePath(identity.handle), await handleToken(identity));
 }
 
 export async function lookupHandle(store, handle) {
@@ -227,9 +261,7 @@ export async function openShare(store, fragment, identity = null) {
 /** Deletes a share. Works for the sender (from a vault entry) and for any holder of `s`. */
 export async function deleteShare(store, { kind, s, hour, n }) {
   const sb = typeof s === 'string' ? b32decode(s) : s;
-  await deleteEnvelope(store, sb, hour, n);
-  if (kind === 'recipient') {
-    const kb = await keyBlockRef(sb, hour);
-    await store.del(kb.path, kb.token).catch(() => false);
-  }
+  const refs = await envelopeRefs(sb, hour, n);
+  if (kind === 'recipient') refs.unshift(await keyBlockRef(sb, hour));
+  await deleteAll(store, refs);
 }

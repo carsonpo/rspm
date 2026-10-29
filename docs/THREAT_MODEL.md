@@ -91,6 +91,9 @@ Mitigations:
 
 ### A5. A recipient or forwarder of a share link
 A link share gives access to whoever has the link until it expires or is burned.
+Burning is cooperative (PROTOCOL §8.1): it stops later opens through the normal
+app, but it can't stop a modified client, or two clients opening the link at
+the same time, from reading it.
 A recipient share is useless to anyone who doesn't hold the recipient's identity
 keys. **Expiry deletes the ciphertext; it cannot make a recipient forget what
 they already decrypted.** Treat any secret you've shared as exposed, and rotate

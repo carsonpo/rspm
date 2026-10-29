@@ -3,7 +3,7 @@
 import { h, signal, when, list } from '../ui.js';
 import { icon } from '../icons.js';
 import { Button, Field, Input, Segmented, Select, Toggle, Notice, DialogHeader, openDialog, copy, toast, relativeHours, Empty, IconButton, confirmDialog } from '../components.js';
-import { session, store, save, config } from '../session.js';
+import { session, store, save, writable, config } from '../session.js';
 import { ItemFields, TYPES } from './item.js';
 import { createLinkShare, createRecipientShare, lookupHandle, openShare, deleteShare, normalizeHandle } from '../../../core/share.js';
 import { putItem } from '../../../core/vault.js';
@@ -42,6 +42,7 @@ export function openShareDialog(item) {
     };
 
     const create = async () => {
+      if (!writable()) return;
       busy.value = true;
       try {
         const from = session.peek()?.vault.doc.identity?.handle ?? null;
@@ -49,8 +50,17 @@ export function openShareDialog(item) {
         const { url, entry } = mode.peek() === 'link'
           ? await createLinkShare(store, shareable(item), opts)
           : await createRecipientShare(store, shareable(item), recipient.peek(), opts);
-        result.value = url;
-        await save((d) => { d.shares = [...(d.shares ?? []), entry]; }, null);
+        // Show the link only once it's tracked in Active shares, so it can always be revoked.
+        if (await save((d) => { d.shares = [...(d.shares ?? []), entry]; }, null)) {
+          result.value = url;
+          return;
+        }
+        try {
+          await deleteShare(store, entry);
+          toast('The share couldn’t be added to your vault, so it was deleted. Try again.', { tone: 'danger', ms: 6000 });
+        } catch {
+          toast(`The share couldn’t be added to your vault or deleted. Anyone with the link can open it until it expires ${relativeHours(entry.hour)}.`, { tone: 'danger', ms: 12000 });
+        }
       } catch (e) {
         toast(`Couldn’t create the share: ${e.message}`, { tone: 'danger' });
       } finally { busy.value = false; }
@@ -89,7 +99,7 @@ export function openShareDialog(item) {
               Toggle({ checked: verified, label: 'The fingerprints match' })) : null))),
           h('div', { class: 'grid-2' },
             Field({ label: 'Expires after', children: Select({ value: hours, options: EXPIRY }) }),
-            h('div', { class: 'field field-toggle' }, Toggle({ checked: burn, label: 'Delete after it’s opened', hint: 'One view only' }))),
+            h('div', { class: 'field field-toggle' }, Toggle({ checked: burn, label: 'Delete after it’s opened', hint: 'The first browser to open it deletes it from the server. Not a guarantee: a modified app can skip deleting, and two people opening it at once can both see it.' }))),
           item.type === 'totp' || item.otpauth ? Notice({ tone: 'warn', title: 'This shares a two-factor secret', children: 'Whoever opens it can generate codes for this account indefinitely.' }) : null))),
       () => (result.value
         ? h('footer', { class: 'dialog-footer' }, Button({ label: 'Done', kind: 'primary', onClick: () => close() }))
@@ -137,12 +147,14 @@ export function ReceivedShare({ fragment, onDone }) {
     try {
       const identity = session.peek()?.vault.doc.identity ?? null;
       const r = await openShare(store, fragment, identity);
-      let burned = false;
+      let burned = false, burnError = null;
       if (r.meta.burn) {
-        await deleteShare(store, { kind: r.kind, s: r.s, hour: r.hour, n: r.meta.n });
-        burned = true;
+        try {
+          await deleteShare(store, { kind: r.kind, s: r.s, hour: r.hour, n: r.meta.n });
+          burned = true;
+        } catch (e) { burnError = e.message; }
       }
-      state.value = { share: r, burned };
+      state.value = { share: r, burned, burnError };
     } catch (e) {
       state.value = { error: e.message };
     }
@@ -164,14 +176,15 @@ export function ReceivedShare({ fragment, onDone }) {
             h('p', { class: 'muted' }, st.error),
             st.error.includes('Sign in') ? Button({ label: 'Sign in', kind: 'primary', onClick: () => onDone({ signIn: true }) }) : Button({ label: 'Go to rspm', onClick: () => onDone() }));
         }
-        const { share, burned } = st;
+        const { share, burned, burnError } = st;
         const item = share.item;
         return h('div', { class: 'stack' },
           h('div', null,
             h('p', { class: 'eyebrow' }, share.meta.from ? `Shared by @${share.meta.from}` : 'Shared with you'),
             h('h1', { class: 'auth-title' }, item.name || 'Untitled'),
             h('p', { class: 'muted small' }, TYPES[item.type]?.label ?? 'Item', burned ? ' · deleted from the server now that you’ve opened it' : ` · expires ${relativeHours(share.hour)}`)),
-          burned && Notice({ tone: 'warn', title: 'One view only', children: 'Copy what you need before leaving this page — it can’t be opened again.' }),
+          burned && Notice({ tone: 'warn', title: 'Deleted from the server', children: 'Copy what you need before leaving this page — this link won’t open again.' }),
+          burnError && Notice({ tone: 'danger', title: 'This share couldn’t be deleted from the server', children: `It was meant to be deleted once opened, so it may still open for others until it expires ${relativeHours(share.hour)}. ${burnError}` }),
           ItemFields({ item }),
           h('div', { class: 'button-row' },
             session.value

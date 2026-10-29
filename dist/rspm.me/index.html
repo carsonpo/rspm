@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
-<meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'sha256-lW8Tnx8wjQgJYflDGByC3f/fmzJLKFbrK4nbdc1a8tg=' 'wasm-unsafe-eval'; style-src 'sha256-dCUUqygBjySfsCARww2rl5xEgAhDVbiqSnyYSbc9Tpw='; connect-src https://api.rspm.me; img-src data: 'self'; manifest-src 'self'; worker-src 'self'; base-uri 'none'; form-action 'none'; require-trusted-types-for 'script'; trusted-types rspm-sw">
+<meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'sha256-9f6l8W5T9xbTbD9YEqp820HADwwEURlU8sjc+oDV1d8=' 'wasm-unsafe-eval'; style-src 'sha256-dCUUqygBjySfsCARww2rl5xEgAhDVbiqSnyYSbc9Tpw='; connect-src https://api.rspm.me; img-src data: 'self'; manifest-src 'self'; worker-src 'self'; base-uri 'none'; form-action 'none'; require-trusted-types-for 'script'; trusted-types rspm-sw">
 <meta name="referrer" content="no-referrer">
 <meta name="color-scheme" content="light dark">
 <meta name="theme-color" content="#f6f6f3" media="(prefers-color-scheme: light)">
@@ -1116,20 +1116,38 @@ function Progress({ value }) {
 
 // ── Dialog ──────────────────────────────────────────────────────────────────
 
+const openDialogs = new Set();
+
 /** Opens a modal <dialog>. `content(close)` renders the body. Returns a promise resolved on close. */
 function openDialog(content, { label, wide } = {}) {
   return new Promise((resolve) => {
-    let result;
-    const close = (r) => { result = r; dlg.close(); };
+    let result, done = false;
+    // Tear down synchronously rather than waiting for the close event, which
+    // browsers may defer while the page is hidden.
+    const finish = () => {
+      if (done) return;
+      done = true;
+      openDialogs.delete(finish);
+      if (dlg.open) dlg.close();
+      dispose();
+      dlg.remove();
+      resolve(result);
+    };
+    const close = (r) => { result = r; finish(); };
     const dlg = h('dialog', { class: ['dialog', wide && 'dialog-wide'], 'aria-label': label });
     document.body.appendChild(dlg);
     const dispose = root((d) => { append(dlg, content(close)); return d; });
-    dlg.addEventListener('close', () => { dispose(); dlg.remove(); resolve(result); });
+    dlg.addEventListener('close', finish);
     dlg.addEventListener('click', (e) => { if (e.target === dlg) close(); });
+    openDialogs.add(finish);
     dlg.showModal();
   });
 }
 
+/** Closes and removes every open dialog (on lock, so nothing secret stays on screen). */
+function closeAllDialogs() {
+  for (const finish of [...openDialogs]) finish();
+}
 
 function DialogHeader({ title, close, subtitle }) {
   return h('header', { class: 'dialog-header' },
@@ -1164,7 +1182,7 @@ function relativeHours(hour) {
   if (hrs < 48) return `in ${hrs} hour${hrs === 1 ? '' : 's'}`;
   return `in ${Math.round(hrs / 24)} days`;
 }
-return { id, toasts, toast, ToastHost, copy, Button, IconButton, Field, Input, Textarea, PasswordInput, Toggle, Segmented, Select, ValueRow, Monogram, Empty, Notice, Progress, openDialog, DialogHeader, confirmDialog, now, relativeHours, effect, onCleanup };
+return { id, toasts, toast, ToastHost, copy, Button, IconButton, Field, Input, Textarea, PasswordInput, Toggle, Segmented, Select, ValueRow, Monogram, Empty, Notice, Progress, openDialog, closeAllDialogs, DialogHeader, confirmDialog, now, relativeHours, effect, onCleanup };
 })();
 
 // app/src/idb.js
@@ -1538,6 +1556,7 @@ const $m10 = (() => {
 
 const { solve } = $m8;
 const { tag } = $m9;
+const { hex } = $m4;
 const DEFAULT_ENDPOINTS = Object.freeze({
   api: 'https://api.rspm.me',
   blocks: 'https://api.rspm.me/v1',
@@ -1584,11 +1603,12 @@ class Store {
     return this.bits;
   }
 
-  async #send(method, path, body) {
+  async #send(method, path, body, extra = {}) {
     const headers = {
       'Content-Type': 'application/octet-stream',
       'RSPM-PoW': await solve({ method, path, body, bits: await this.difficulty() }),
       'RSPM-Tag': await tag(),
+      ...extra,
     };
     return this.fetch(`${this.api}/v1/${path}`, { method, headers, body });
   }
@@ -1600,6 +1620,18 @@ class Store {
     if (res.status === 409) return false;
     if (res.status === 403 && (await res.clone().text()).includes('pow')) this.bits = null;
     throw new StoreError(`write failed (${res.status}): ${await res.text()}`, res.status);
+  }
+
+  /**
+   * Replaces a handle record in place, authorized by its current delete token.
+   * Returns true if replaced, false if the record changed concurrently.
+   */
+  async replace(path, body, token) {
+    const res = await this.#send('PUT', path, body, { 'RSPM-Replace': hex(token) });
+    if (res.status === 200) return true;
+    if (res.status === 409) return false;
+    if (res.status === 403 && (await res.clone().text()).includes('pow')) this.bits = null;
+    throw new StoreError(`replace failed (${res.status}): ${await res.text()}`, res.status);
   }
 
   /** Delete by token. Returns true if deleted, false if it did not exist. */
@@ -2059,6 +2091,7 @@ function removeItem(doc, id) {
 
 class Vault {
   #state;
+  #rollback = null;
 
   constructor(store, keys, state) {
     this.store = store;
@@ -2068,6 +2101,8 @@ class Vault {
 
   get gen() { return this.#state.gen; }
   get doc() { return this.#state.doc; }
+  /** A RollbackError if this vault was opened at an older generation than expected (read-only), else null. */
+  get readOnly() { return this.#rollback; }
 
   static async create(store, keys, doc = emptyDoc(), onProgress) {
     if (await store.exists((await headRef(keys, 1)).path)) throw new VaultExistsError();
@@ -2076,14 +2111,20 @@ class Vault {
     return new Vault(store, keys, state);
   }
 
-  /** Opens the latest generation. Throws RollbackError if it is older than `minGen`. */
-  static async open(store, keys, { minGen = 0 } = {}) {
+  /**
+   * Opens the latest generation. If it is older than `minGen`, throws
+   * RollbackError — or, with `readOnlyIfOlder`, opens it read-only: every
+   * write then throws that RollbackError (§6.4).
+   */
+  static async open(store, keys, { minGen = 0, readOnlyIfOlder = false } = {}) {
     for (let attempt = 0; ; attempt++) {
       const g = await findLatest(store, keys);
       if (g === 0) throw new VaultNotFoundError();
-      if (g < minGen) throw new RollbackError(g, minGen);
+      if (g < minGen && !readOnlyIfOlder) throw new RollbackError(g, minGen);
       try {
-        return new Vault(store, keys, await loadGeneration(store, keys, g));
+        const v = new Vault(store, keys, await loadGeneration(store, keys, g));
+        if (g < minGen) v.#rollback = new RollbackError(g, minGen);
+        return v;
       } catch (err) {
         // A concurrent save pruned the generation between search and read.
         if (!(err instanceof GoneError) || attempt >= 3) throw err;
@@ -2091,10 +2132,16 @@ class Vault {
     }
   }
 
-  /** Re-reads the latest generation from the server. */
+  #writable() {
+    if (this.#rollback) throw this.#rollback;
+  }
+
+  /** Re-reads the latest generation from the server. A read-only vault becomes writable once the expected generation is back. */
   async refresh() {
-    const fresh = await Vault.open(this.store, this.keys, { minGen: this.gen });
+    const minGen = Math.max(this.gen, this.#rollback?.expected ?? 0);
+    const fresh = await Vault.open(this.store, this.keys, { minGen, readOnlyIfOlder: !!this.#rollback });
     this.#state = fresh.#state;
+    this.#rollback = fresh.#rollback;
     return this;
   }
 
@@ -2103,6 +2150,7 @@ class Vault {
    * generation. If another device saved first, merges and retries.
    */
   async update(change, onProgress) {
+    this.#writable();
     const local = structuredClone(this.doc);
     await change(local);
     let base = this.#state;
@@ -2123,6 +2171,7 @@ class Vault {
 
   /** Deletes every block of this vault (best-effort). Used after a credential change (§7). */
   async destroy() {
+    this.#writable();
     const s = this.#state;
     await prune(this.store, this.keys, s, 0);
     const heads = await Promise.all([...retained(s.gen)].map((g) => headRef(this.keys, g)));
@@ -2131,6 +2180,7 @@ class Vault {
 
   /** Moves the vault to new credentials (§7). Returns the new vault. */
   async rekey(newKeys, onProgress) {
+    this.#writable();
     const fresh = await Vault.create(this.store, newKeys, this.doc, onProgress);
     const check = await Vault.open(this.store, newKeys);
     if (JSON.stringify(check.doc) !== JSON.stringify(this.doc)) throw new CorruptVaultError('new vault did not read back');
@@ -2313,7 +2363,7 @@ const $m16 = (() => {
 // Session state: credentials, the open vault, saving, and locking.
 
 const { signal } = $m0;
-const { toast } = $m2;
+const { toast, closeAllDialogs } = $m2;
 const idb = $m3;
 const { Store } = $m10;
 const { deriveKeys, salt } = $m12;
@@ -2426,7 +2476,8 @@ async function signIn({ username, password, accountKey, rememberKey, allowRollba
   onStep('Finding your vault');
   let vault;
   try {
-    vault = await Vault.open(store, keys, { minGen: allowRollback ? 0 : rec?.maxGen ?? 0 });
+    // With allowRollback an older generation opens read-only: every write throws RollbackError.
+    vault = await Vault.open(store, keys, { minGen: rec?.maxGen ?? 0, readOnlyIfOlder: allowRollback });
   } catch (err) {
     if (err instanceof VaultNotFoundError) {
       throw new SignInError(password
@@ -2442,7 +2493,7 @@ async function signIn({ username, password, accountKey, rememberKey, allowRollba
     const pk = { id: rec.passkey.id, kind: rec.passkey.kind, created: rec.passkey.created, ...(await wrapDeviceKey(stored.legacyPrf, dk, saltHex)) };
     await writeProtection(saltHex, { accountKey: key, keys, dk, prfSalt: b64decode(rec.passkey.salt), passkeys: [pk], quick: false });
   }
-  start(username, vault, key, saltHex, { rollback: allowRollback && rec?.maxGen > vault.gen });
+  start(username, vault, key, saltHex, { rollback: !!vault.readOnly });
 }
 
 async function createAccount({ username, password, accountKey, rememberKey }, onStep = () => {}, onProgress) {
@@ -2455,10 +2506,22 @@ async function createAccount({ username, password, accountKey, rememberKey }, on
   start(username, vault, accountKey, saltHex);
 }
 
+/**
+ * Whether the open vault accepts writes. Call before anything that writes to
+ * the server outside `save()` (shares, handles), so nothing is left orphaned.
+ */
+function writable() {
+  const s = session.peek();
+  if (!s) return false;
+  if (!s.vault.readOnly) return true;
+  toast('This is an older revision of your vault — saving is disabled', { tone: 'danger', ms: 6000 });
+  return false;
+}
+
 /** Saves a change to the vault. Returns true on success. */
 async function save(change, message = 'Saved') {
   const s = session.peek();
-  if (!s) return false;
+  if (!s || !writable()) return false;
   saving.value = { done: 0, total: 1 };
   try {
     await s.vault.update(change, (done, total) => { saving.value = { done, total }; });
@@ -2481,6 +2544,7 @@ async function refresh() {
   if (!s || saving.peek()) return;
   try {
     await s.vault.refresh();
+    if (!!s.vault.readOnly !== !!s.rollback) session.value = { ...s, rollback: !!s.vault.readOnly };
     doc.value = s.vault.doc;
     await remember(s.saltHex, s.username, { gen: s.vault.gen });
   } catch (err) {
@@ -2566,10 +2630,11 @@ async function forgetDevice() {
 }
 
 function lock() {
+  closeAllDialogs();
   session.value = null;
   doc.value = null;
 }
-return { config, store, session, doc, saving, SignInError, deviceRecord, remembersKey, quickUnlock, lastUsername, signIn, createAccount, save, refresh, replaceVault, addPasskey, removePasskey, setQuickUnlock, rememberPlain, forgetDevice, lock };
+return { config, store, session, doc, saving, SignInError, deviceRecord, remembersKey, quickUnlock, lastUsername, signIn, createAccount, writable, save, refresh, replaceVault, addPasskey, removePasskey, setQuickUnlock, rememberPlain, forgetDevice, lock };
 })();
 
 // app/src/build-info.js
@@ -4146,10 +4211,21 @@ async function readEnvelope(store, s, hour) {
   return { meta, payload: JSON.parse(fromUtf8(await inflate(raw))) };
 }
 
-async function deleteEnvelope(store, s, hour, n) {
+async function envelopeRefs(s, hour, n) {
   const keys = await envelopeKeys(s);
-  const refs = await Promise.all(Array.from({ length: n + 1 }, (_, i) => shareRef(keys, hour, i)));
-  await pool(refs, 6, (r) => store.del(r.path, r.token).catch(() => false));
+  return Promise.all(Array.from({ length: n + 1 }, (_, i) => shareRef(keys, hour, i)));
+}
+
+/**
+ * Deletes every ref, attempting all of them even if some fail, then throws if
+ * any failed. Already-missing objects count as deleted, so retrying is safe.
+ */
+async function deleteAll(store, refs) {
+  const errors = [];
+  await pool(refs, 6, (r) => store.del(r.path, r.token).catch((err) => { errors.push(err); }));
+  if (errors.length) {
+    throw new ShareError(`${errors.length} of ${refs.length} parts of the share couldn’t be deleted from the server (${errors[0].message}). Try again.`);
+  }
 }
 
 function checkHours(hours) {
@@ -4196,12 +4272,18 @@ function identityKeys(identity) {
   return { xsk: b64decode(identity.x25519_sk), xpk: b64decode(identity.x25519_pk), ek, dk };
 }
 
-const handleToken = (locKey, handle) => locate(locKey, concat(utf8('handle'), utf8(handle)));
+/**
+ * The handle's delete/replace token, derived from the identity's own secrets
+ * so it moves with the identity through credential changes (§8.3.1).
+ */
+const handleToken = (identity) => hkdf(concat(b64decode(identity.x25519_sk), b64decode(identity.mlkem_seed)), 'rspm/v1', 'handle-token');
+/** Version 1 records derived the token from the vault's location key instead. */
+const legacyHandleToken = async (locKey, handle) => (await locate(locKey, concat(utf8('handle'), utf8(handle)))).token;
 
-async function buildHandleRecord(identity, locKey) {
+async function buildHandleRecord(identity) {
   const { xpk, ek } = identityKeys(identity);
   const name = utf8(identity.handle);
-  const { token } = await handleToken(locKey, identity.handle);
+  const token = await handleToken(identity);
   const rec = random(BLOCK);
   rec[0] = 0x01;
   rec.set(utf8('RSPMH1'), 1);
@@ -4226,17 +4308,34 @@ function parseHandleRecord(rec) {
 }
 
 /** Publishes the identity's handle. Returns false if the handle is taken by someone else. */
-async function publishHandle(store, identity, locKey) {
+async function publishHandle(store, identity) {
   const path = await handlePath(identity.handle);
-  if (await store.put(path, await buildHandleRecord(identity, locKey))) return true;
+  if (await store.put(path, await buildHandleRecord(identity))) return true;
   // Already ours (e.g. published from another device)?
   const existing = parseHandleRecord(await store.get(path));
   return !!existing && equal(existing.xpk, b64decode(identity.x25519_pk));
 }
 
-async function unpublishHandle(store, identity, locKey) {
-  const { token } = await handleToken(locKey, identity.handle);
-  return store.del(await handlePath(identity.handle), token);
+/**
+ * Moves a version 1 handle record (token derived from `locKey`) to the
+ * identity-derived token, replacing it atomically so the handle is never free.
+ * Returns 'current', 'migrated', 'missing', 'foreign' (not ours), or 'stale'
+ * (a version 1 record from credentials older than `locKey`, which can't be updated).
+ */
+async function migrateHandle(store, identity, locKey) {
+  const path = await handlePath(identity.handle);
+  const rec = parseHandleRecord(await store.get(path));
+  if (!rec) return 'missing';
+  if (!equal(rec.xpk, b64decode(identity.x25519_pk))) return 'foreign';
+  if (equal(rec.verifier, await sha256(await handleToken(identity)))) return 'current';
+  const legacy = await legacyHandleToken(locKey, identity.handle);
+  if (!equal(rec.verifier, await sha256(legacy))) return 'stale';
+  if (!(await store.replace(path, await buildHandleRecord(identity), legacy))) throw new ShareError('The handle changed while updating it. Try again.');
+  return 'migrated';
+}
+
+async function unpublishHandle(store, identity) {
+  return store.del(await handlePath(identity.handle), await handleToken(identity));
 }
 
 async function lookupHandle(store, handle) {
@@ -4313,13 +4412,11 @@ async function openShare(store, fragment, identity = null) {
 /** Deletes a share. Works for the sender (from a vault entry) and for any holder of `s`. */
 async function deleteShare(store, { kind, s, hour, n }) {
   const sb = typeof s === 'string' ? b32decode(s) : s;
-  await deleteEnvelope(store, sb, hour, n);
-  if (kind === 'recipient') {
-    const kb = await keyBlockRef(sb, hour);
-    await store.del(kb.path, kb.token).catch(() => false);
-  }
+  const refs = await envelopeRefs(sb, hour, n);
+  if (kind === 'recipient') refs.unshift(await keyBlockRef(sb, hour));
+  await deleteAll(store, refs);
 }
-return { MAX_HOURS, LINK_ORIGIN, ShareError, createLinkShare, normalizeHandle, handlePath, fingerprint, createIdentity, buildHandleRecord, parseHandleRecord, publishHandle, unpublishHandle, lookupHandle, hybridSecret, createRecipientShare, parseShareFragment, openShare, deleteShare };
+return { MAX_HOURS, LINK_ORIGIN, ShareError, createLinkShare, normalizeHandle, handlePath, fingerprint, createIdentity, buildHandleRecord, parseHandleRecord, publishHandle, migrateHandle, unpublishHandle, lookupHandle, hybridSecret, createRecipientShare, parseShareFragment, openShare, deleteShare };
 })();
 
 // app/src/views/share.js
@@ -4329,7 +4426,7 @@ const $m30 = (() => {
 const { h, signal, when, list } = $m0;
 const { icon } = $m1;
 const { Button, Field, Input, Segmented, Select, Toggle, Notice, DialogHeader, openDialog, copy, toast, relativeHours, Empty, IconButton, confirmDialog } = $m2;
-const { session, store, save, config } = $m16;
+const { session, store, save, writable, config } = $m16;
 const { ItemFields, TYPES } = $m26;
 const { createLinkShare, createRecipientShare, lookupHandle, openShare, deleteShare, normalizeHandle } = $m29;
 const { putItem } = $m14;
@@ -4367,6 +4464,7 @@ function openShareDialog(item) {
     };
 
     const create = async () => {
+      if (!writable()) return;
       busy.value = true;
       try {
         const from = session.peek()?.vault.doc.identity?.handle ?? null;
@@ -4374,8 +4472,17 @@ function openShareDialog(item) {
         const { url, entry } = mode.peek() === 'link'
           ? await createLinkShare(store, shareable(item), opts)
           : await createRecipientShare(store, shareable(item), recipient.peek(), opts);
-        result.value = url;
-        await save((d) => { d.shares = [...(d.shares ?? []), entry]; }, null);
+        // Show the link only once it's tracked in Active shares, so it can always be revoked.
+        if (await save((d) => { d.shares = [...(d.shares ?? []), entry]; }, null)) {
+          result.value = url;
+          return;
+        }
+        try {
+          await deleteShare(store, entry);
+          toast('The share couldn’t be added to your vault, so it was deleted. Try again.', { tone: 'danger', ms: 6000 });
+        } catch {
+          toast(`The share couldn’t be added to your vault or deleted. Anyone with the link can open it until it expires ${relativeHours(entry.hour)}.`, { tone: 'danger', ms: 12000 });
+        }
       } catch (e) {
         toast(`Couldn’t create the share: ${e.message}`, { tone: 'danger' });
       } finally { busy.value = false; }
@@ -4414,7 +4521,7 @@ function openShareDialog(item) {
               Toggle({ checked: verified, label: 'The fingerprints match' })) : null))),
           h('div', { class: 'grid-2' },
             Field({ label: 'Expires after', children: Select({ value: hours, options: EXPIRY }) }),
-            h('div', { class: 'field field-toggle' }, Toggle({ checked: burn, label: 'Delete after it’s opened', hint: 'One view only' }))),
+            h('div', { class: 'field field-toggle' }, Toggle({ checked: burn, label: 'Delete after it’s opened', hint: 'The first browser to open it deletes it from the server. Not a guarantee: a modified app can skip deleting, and two people opening it at once can both see it.' }))),
           item.type === 'totp' || item.otpauth ? Notice({ tone: 'warn', title: 'This shares a two-factor secret', children: 'Whoever opens it can generate codes for this account indefinitely.' }) : null))),
       () => (result.value
         ? h('footer', { class: 'dialog-footer' }, Button({ label: 'Done', kind: 'primary', onClick: () => close() }))
@@ -4462,12 +4569,14 @@ function ReceivedShare({ fragment, onDone }) {
     try {
       const identity = session.peek()?.vault.doc.identity ?? null;
       const r = await openShare(store, fragment, identity);
-      let burned = false;
+      let burned = false, burnError = null;
       if (r.meta.burn) {
-        await deleteShare(store, { kind: r.kind, s: r.s, hour: r.hour, n: r.meta.n });
-        burned = true;
+        try {
+          await deleteShare(store, { kind: r.kind, s: r.s, hour: r.hour, n: r.meta.n });
+          burned = true;
+        } catch (e) { burnError = e.message; }
       }
-      state.value = { share: r, burned };
+      state.value = { share: r, burned, burnError };
     } catch (e) {
       state.value = { error: e.message };
     }
@@ -4489,14 +4598,15 @@ function ReceivedShare({ fragment, onDone }) {
             h('p', { class: 'muted' }, st.error),
             st.error.includes('Sign in') ? Button({ label: 'Sign in', kind: 'primary', onClick: () => onDone({ signIn: true }) }) : Button({ label: 'Go to rspm', onClick: () => onDone() }));
         }
-        const { share, burned } = st;
+        const { share, burned, burnError } = st;
         const item = share.item;
         return h('div', { class: 'stack' },
           h('div', null,
             h('p', { class: 'eyebrow' }, share.meta.from ? `Shared by @${share.meta.from}` : 'Shared with you'),
             h('h1', { class: 'auth-title' }, item.name || 'Untitled'),
             h('p', { class: 'muted small' }, TYPES[item.type]?.label ?? 'Item', burned ? ' · deleted from the server now that you’ve opened it' : ` · expires ${relativeHours(share.hour)}`)),
-          burned && Notice({ tone: 'warn', title: 'One view only', children: 'Copy what you need before leaving this page — it can’t be opened again.' }),
+          burned && Notice({ tone: 'warn', title: 'Deleted from the server', children: 'Copy what you need before leaving this page — this link won’t open again.' }),
+          burnError && Notice({ tone: 'danger', title: 'This share couldn’t be deleted from the server', children: `It was meant to be deleted once opened, so it may still open for others until it expires ${relativeHours(share.hour)}. ${burnError}` }),
           ItemFields({ item }),
           h('div', { class: 'button-row' },
             session.value
@@ -4515,12 +4625,12 @@ const $m31 = (() => {
 const { h, signal } = $m0;
 const { icon } = $m1;
 const { Button, Field, Input, PasswordInput, Toggle, Notice, DialogHeader, openDialog, copy, toast, confirmDialog, Progress } = $m2;
-const { session, store, save, config, replaceVault, lock } = $m16;
+const { session, store, save, writable, config, replaceVault, lock } = $m16;
 const { UnlockSection } = $m23;
 const { printKit, download } = $m18;
 const idb = $m3;
 const { formatAccountKey, deriveKeys, generateAccountKey, salt } = $m12;
-const { createIdentity, publishHandle, unpublishHandle, lookupHandle, fingerprint, normalizeHandle } = $m29;
+const { createIdentity, publishHandle, unpublishHandle, migrateHandle, lookupHandle, fingerprint, normalizeHandle } = $m29;
 const { b64, b64decode, equal, utf8, fromUtf8, hex } = $m4;
 const { aesKey, hkdf, seal, open, random } = $m5;
 const { merge } = $m14;
@@ -4596,6 +4706,8 @@ function changeCredentials() {
       try {
         const check = await deriveKeys(s.username, current.peek(), s.accountKey);
         if (!equal(check.loc, s.vault.keys.loc)) throw new Error('Your current password is incorrect');
+        // The handle's token must not depend on the old credentials once they're gone (§8.3.1).
+        if (s.vault.doc.identity) await migrateHandle(store, s.vault.doc.identity, s.vault.keys.loc);
         const key = rotate.peek() ? (await generateAccountKey()).bytes : s.accountKey;
         const keys = await deriveKeys(username.peek(), pw.peek(), key);
         const fresh = await s.vault.rekey(keys, (d, t) => { progress.value = d / t; });
@@ -4671,8 +4783,11 @@ function HandleSection() {
     fp.value = await fingerprint(b64decode(id.x25519_pk), ek);
   };
   refreshFp();
+  // Upgrade a version 1 handle record to the identity-derived token (best effort; retried on every visit).
+  if (identity.peek()) migrateHandle(store, identity.peek(), s.vault.keys.loc).catch(() => {});
 
   const publish = async () => {
+    if (!writable()) return;
     error.value = null;
     let name;
     try { name = normalizeHandle(handle.peek()); } catch (e) { error.value = e.message; return; }
@@ -4680,9 +4795,9 @@ function HandleSection() {
     try {
       if (await lookupHandle(store, name)) throw new Error(`@${name} is already taken`);
       const id = await createIdentity(name);
-      if (!(await publishHandle(store, id, s.vault.keys.loc))) throw new Error(`@${name} is already taken`);
+      if (!(await publishHandle(store, id))) throw new Error(`@${name} is already taken`);
       if (!(await save((d) => { d.identity = id; }, `You’re now @${name}`))) {
-        await unpublishHandle(store, id, s.vault.keys.loc).catch(() => {});
+        await unpublishHandle(store, id).catch(() => {});
         return;
       }
       identity.value = id;
@@ -4693,9 +4808,10 @@ function HandleSection() {
   const unpublish = async () => {
     const id = identity.peek();
     const ok = await confirmDialog({ title: `Remove @${id.handle}?`, body: 'People will no longer be able to share items with this handle. Links already sent to you will stop opening. Someone else could claim the handle afterwards.', confirm: 'Remove handle', danger: true });
-    if (!ok) return;
+    if (!ok || !writable()) return;
     try {
-      await unpublishHandle(store, id, s.vault.keys.loc);
+      await migrateHandle(store, id, s.vault.keys.loc);
+      await unpublishHandle(store, id);
       if (await save((d) => { d.identity = null; }, 'Handle removed')) identity.value = null;
     } catch (e) { toast(`Couldn’t remove: ${e.message}`, { tone: 'danger' }); }
   };

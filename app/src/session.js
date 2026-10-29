@@ -1,7 +1,7 @@
 // Session state: credentials, the open vault, saving, and locking.
 
 import { signal } from './ui.js';
-import { toast } from './components.js';
+import { toast, closeAllDialogs } from './components.js';
 import * as idb from './idb.js';
 import { Store } from '../../core/store.js';
 import { deriveKeys, salt } from '../../core/kdf.js';
@@ -118,7 +118,8 @@ export async function signIn({ username, password, accountKey, rememberKey, allo
   onStep('Finding your vault');
   let vault;
   try {
-    vault = await Vault.open(store, keys, { minGen: allowRollback ? 0 : rec?.maxGen ?? 0 });
+    // With allowRollback an older generation opens read-only: every write throws RollbackError.
+    vault = await Vault.open(store, keys, { minGen: rec?.maxGen ?? 0, readOnlyIfOlder: allowRollback });
   } catch (err) {
     if (err instanceof VaultNotFoundError) {
       throw new SignInError(password
@@ -134,7 +135,7 @@ export async function signIn({ username, password, accountKey, rememberKey, allo
     const pk = { id: rec.passkey.id, kind: rec.passkey.kind, created: rec.passkey.created, ...(await wrapDeviceKey(stored.legacyPrf, dk, saltHex)) };
     await writeProtection(saltHex, { accountKey: key, keys, dk, prfSalt: b64decode(rec.passkey.salt), passkeys: [pk], quick: false });
   }
-  start(username, vault, key, saltHex, { rollback: allowRollback && rec?.maxGen > vault.gen });
+  start(username, vault, key, saltHex, { rollback: !!vault.readOnly });
 }
 
 export async function createAccount({ username, password, accountKey, rememberKey }, onStep = () => {}, onProgress) {
@@ -147,10 +148,22 @@ export async function createAccount({ username, password, accountKey, rememberKe
   start(username, vault, accountKey, saltHex);
 }
 
+/**
+ * Whether the open vault accepts writes. Call before anything that writes to
+ * the server outside `save()` (shares, handles), so nothing is left orphaned.
+ */
+export function writable() {
+  const s = session.peek();
+  if (!s) return false;
+  if (!s.vault.readOnly) return true;
+  toast('This is an older revision of your vault — saving is disabled', { tone: 'danger', ms: 6000 });
+  return false;
+}
+
 /** Saves a change to the vault. Returns true on success. */
 export async function save(change, message = 'Saved') {
   const s = session.peek();
-  if (!s) return false;
+  if (!s || !writable()) return false;
   saving.value = { done: 0, total: 1 };
   try {
     await s.vault.update(change, (done, total) => { saving.value = { done, total }; });
@@ -173,6 +186,7 @@ export async function refresh() {
   if (!s || saving.peek()) return;
   try {
     await s.vault.refresh();
+    if (!!s.vault.readOnly !== !!s.rollback) session.value = { ...s, rollback: !!s.vault.readOnly };
     doc.value = s.vault.doc;
     await remember(s.saltHex, s.username, { gen: s.vault.gen });
   } catch (err) {
@@ -258,6 +272,7 @@ export async function forgetDevice() {
 }
 
 export function lock() {
+  closeAllDialogs();
   session.value = null;
   doc.value = null;
 }

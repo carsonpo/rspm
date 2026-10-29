@@ -5,6 +5,8 @@ The Cloudflare Worker for `api.rspm.me`. It deliberately does very little:
 - `PUT /v1/{path}`: verify the PoW and client tag, run the block validity checks
   (PROTOCOL §9.4, all in [src/validate.js](src/validate.js)), then do an atomic
   create-once write to R2.
+- `PUT /v1/h/{id}` with `RSPM-Replace`: replace a handle record in place,
+  authorized by its current delete token, conditional on its etag.
 - `DELETE /v1/{path}`: check the delete token, then delete.
 - `GET /v1/pow`: report the current difficulty.
 - `GET`/`HEAD /v1/{path}`: public reads. This is where clients read blocks from.
@@ -56,7 +58,9 @@ Then, in the Cloudflare dashboard:
 > `put(key, body, { onlyIf: new Headers({ 'If-None-Match': '*' }) })`. The tests
 > cover these semantics against an in-memory bucket. Confirm against real R2
 > that a second `put` to the same key returns `null` and doesn't overwrite;
-> multi-device safety (PROTOCOL §6.3) depends on it.
+> multi-device safety (PROTOCOL §6.3) depends on it. Likewise check that
+> `put(key, body, { onlyIf: new Headers({ 'If-Match': etag }) })` returns `null`
+> when the object changed after `get` returned that etag (handle replacement).
 
 Self-hosting is the same steps with your own names. Set `APP_ORIGINS` to your
 app's origin and build the app with `RSPM_API`/`RSPM_BLOCKS` pointing at your

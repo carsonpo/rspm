@@ -12,6 +12,9 @@ import { buildApp } from './build-app.js';
 import { pathToFileURL } from 'node:url';
 import { handle, expire } from '../worker/src/handler.js';
 import { verifyTag } from '../core/tag.js';
+import { createHash } from 'node:crypto';
+
+const etag = (v) => createHash('sha256').update(v).digest('hex').slice(0, 32);
 
 /** R2-compatible bucket on the local filesystem. */
 class FsBucket {
@@ -19,16 +22,19 @@ class FsBucket {
   file(key) { return join(this.dir, key); }
   async put(key, value, { onlyIf } = {}) {
     const f = this.file(key);
-    if (onlyIf?.get?.('If-None-Match') === '*' && existsSync(f)) return null;
+    const create = onlyIf?.get?.('If-None-Match') === '*';
+    if (create && existsSync(f)) return null;
+    const ifMatch = onlyIf?.get?.('If-Match');
+    if (ifMatch && (!existsSync(f) || etag(readFileSync(f)) !== ifMatch)) return null;
     mkdirSync(dirname(f), { recursive: true });
-    writeFileSync(f, new Uint8Array(value), { flag: onlyIf ? 'wx' : 'w' });
+    writeFileSync(f, new Uint8Array(value), { flag: create ? 'wx' : 'w' });
     return { key };
   }
   async get(key) {
     const f = this.file(key);
     if (!existsSync(f)) return null;
     const b = readFileSync(f);
-    return { key, arrayBuffer: async () => b.buffer.slice(b.byteOffset, b.byteOffset + b.length) };
+    return { key, etag: etag(b), arrayBuffer: async () => b.buffer.slice(b.byteOffset, b.byteOffset + b.length) };
   }
   async head(key) { return existsSync(this.file(key)) ? { key } : null; }
   async delete(keys) { for (const k of [].concat(keys)) rmSync(this.file(k), { force: true }); }

@@ -171,20 +171,38 @@ export function Progress({ value }) {
 
 // ── Dialog ──────────────────────────────────────────────────────────────────
 
+const openDialogs = new Set();
+
 /** Opens a modal <dialog>. `content(close)` renders the body. Returns a promise resolved on close. */
 export function openDialog(content, { label, wide } = {}) {
   return new Promise((resolve) => {
-    let result;
-    const close = (r) => { result = r; dlg.close(); };
+    let result, done = false;
+    // Tear down synchronously rather than waiting for the close event, which
+    // browsers may defer while the page is hidden.
+    const finish = () => {
+      if (done) return;
+      done = true;
+      openDialogs.delete(finish);
+      if (dlg.open) dlg.close();
+      dispose();
+      dlg.remove();
+      resolve(result);
+    };
+    const close = (r) => { result = r; finish(); };
     const dlg = h('dialog', { class: ['dialog', wide && 'dialog-wide'], 'aria-label': label });
     document.body.appendChild(dlg);
     const dispose = root((d) => { append(dlg, content(close)); return d; });
-    dlg.addEventListener('close', () => { dispose(); dlg.remove(); resolve(result); });
+    dlg.addEventListener('close', finish);
     dlg.addEventListener('click', (e) => { if (e.target === dlg) close(); });
+    openDialogs.add(finish);
     dlg.showModal();
   });
 }
 
+/** Closes and removes every open dialog (on lock, so nothing secret stays on screen). */
+export function closeAllDialogs() {
+  for (const finish of [...openDialogs]) finish();
+}
 
 export function DialogHeader({ title, close, subtitle }) {
   return h('header', { class: 'dialog-header' },

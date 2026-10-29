@@ -2,6 +2,7 @@
 
 import { solve } from './pow.js';
 import { tag } from './tag.js';
+import { hex } from './encoding.js';
 
 export const DEFAULT_ENDPOINTS = Object.freeze({
   api: 'https://api.rspm.me',
@@ -49,11 +50,12 @@ export class Store {
     return this.bits;
   }
 
-  async #send(method, path, body) {
+  async #send(method, path, body, extra = {}) {
     const headers = {
       'Content-Type': 'application/octet-stream',
       'RSPM-PoW': await solve({ method, path, body, bits: await this.difficulty() }),
       'RSPM-Tag': await tag(),
+      ...extra,
     };
     return this.fetch(`${this.api}/v1/${path}`, { method, headers, body });
   }
@@ -65,6 +67,18 @@ export class Store {
     if (res.status === 409) return false;
     if (res.status === 403 && (await res.clone().text()).includes('pow')) this.bits = null;
     throw new StoreError(`write failed (${res.status}): ${await res.text()}`, res.status);
+  }
+
+  /**
+   * Replaces a handle record in place, authorized by its current delete token.
+   * Returns true if replaced, false if the record changed concurrently.
+   */
+  async replace(path, body, token) {
+    const res = await this.#send('PUT', path, body, { 'RSPM-Replace': hex(token) });
+    if (res.status === 200) return true;
+    if (res.status === 409) return false;
+    if (res.status === 403 && (await res.clone().text()).includes('pow')) this.bits = null;
+    throw new StoreError(`replace failed (${res.status}): ${await res.text()}`, res.status);
   }
 
   /** Delete by token. Returns true if deleted, false if it did not exist. */

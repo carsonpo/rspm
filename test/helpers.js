@@ -3,21 +3,26 @@
 import { handle } from '../worker/src/handler.js';
 import { verifyTag } from '../core/tag.js';
 import { Store } from '../core/store.js';
+import { createHash } from 'node:crypto';
+
+const etag = (v) => createHash('sha256').update(v).digest('hex').slice(0, 32);
 
 /** Implements the subset of the R2 binding API the worker uses. */
 export class MemoryBucket {
   constructor() { this.objects = new Map(); }
 
   async put(key, value, opts = {}) {
-    const ifNoneMatch = opts.onlyIf instanceof Headers ? opts.onlyIf.get('If-None-Match') : null;
-    if (ifNoneMatch === '*' && this.objects.has(key)) return null;
+    const cond = opts.onlyIf instanceof Headers ? opts.onlyIf : null;
+    if (cond?.get('If-None-Match') === '*' && this.objects.has(key)) return null;
+    const ifMatch = cond?.get('If-Match');
+    if (ifMatch && (!this.objects.has(key) || etag(this.objects.get(key)) !== ifMatch)) return null;
     this.objects.set(key, new Uint8Array(value));
     return { key };
   }
 
   async get(key) {
     const v = this.objects.get(key);
-    return v ? { key, arrayBuffer: async () => v.slice().buffer } : null;
+    return v ? { key, etag: etag(v), arrayBuffer: async () => v.slice().buffer } : null;
   }
 
   async head(key) { return this.objects.has(key) ? { key } : null; }

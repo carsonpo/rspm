@@ -3,12 +3,12 @@
 import { h, signal } from '../ui.js';
 import { icon } from '../icons.js';
 import { Button, Field, Input, PasswordInput, Toggle, Notice, DialogHeader, openDialog, copy, toast, confirmDialog, Progress } from '../components.js';
-import { session, store, save, config, replaceVault, lock } from '../session.js';
+import { session, store, save, writable, config, replaceVault, lock } from '../session.js';
 import { UnlockSection } from './device.js';
 import { printKit, download } from '../kit.js';
 import * as idb from '../idb.js';
 import { formatAccountKey, deriveKeys, generateAccountKey, salt } from '../../../core/kdf.js';
-import { createIdentity, publishHandle, unpublishHandle, lookupHandle, fingerprint, normalizeHandle } from '../../../core/share.js';
+import { createIdentity, publishHandle, unpublishHandle, migrateHandle, lookupHandle, fingerprint, normalizeHandle } from '../../../core/share.js';
 import { b64, b64decode, equal, utf8, fromUtf8, hex } from '../../../core/encoding.js';
 import { aesKey, hkdf, seal, open, random } from '../../../core/crypto.js';
 import { merge } from '../../../core/vault.js';
@@ -85,6 +85,8 @@ function changeCredentials() {
       try {
         const check = await deriveKeys(s.username, current.peek(), s.accountKey);
         if (!equal(check.loc, s.vault.keys.loc)) throw new Error('Your current password is incorrect');
+        // The handle's token must not depend on the old credentials once they're gone (§8.3.1).
+        if (s.vault.doc.identity) await migrateHandle(store, s.vault.doc.identity, s.vault.keys.loc);
         const key = rotate.peek() ? (await generateAccountKey()).bytes : s.accountKey;
         const keys = await deriveKeys(username.peek(), pw.peek(), key);
         const fresh = await s.vault.rekey(keys, (d, t) => { progress.value = d / t; });
@@ -160,8 +162,11 @@ function HandleSection() {
     fp.value = await fingerprint(b64decode(id.x25519_pk), ek);
   };
   refreshFp();
+  // Upgrade a version 1 handle record to the identity-derived token (best effort; retried on every visit).
+  if (identity.peek()) migrateHandle(store, identity.peek(), s.vault.keys.loc).catch(() => {});
 
   const publish = async () => {
+    if (!writable()) return;
     error.value = null;
     let name;
     try { name = normalizeHandle(handle.peek()); } catch (e) { error.value = e.message; return; }
@@ -169,9 +174,9 @@ function HandleSection() {
     try {
       if (await lookupHandle(store, name)) throw new Error(`@${name} is already taken`);
       const id = await createIdentity(name);
-      if (!(await publishHandle(store, id, s.vault.keys.loc))) throw new Error(`@${name} is already taken`);
+      if (!(await publishHandle(store, id))) throw new Error(`@${name} is already taken`);
       if (!(await save((d) => { d.identity = id; }, `You’re now @${name}`))) {
-        await unpublishHandle(store, id, s.vault.keys.loc).catch(() => {});
+        await unpublishHandle(store, id).catch(() => {});
         return;
       }
       identity.value = id;
@@ -182,9 +187,10 @@ function HandleSection() {
   const unpublish = async () => {
     const id = identity.peek();
     const ok = await confirmDialog({ title: `Remove @${id.handle}?`, body: 'People will no longer be able to share items with this handle. Links already sent to you will stop opening. Someone else could claim the handle afterwards.', confirm: 'Remove handle', danger: true });
-    if (!ok) return;
+    if (!ok || !writable()) return;
     try {
-      await unpublishHandle(store, id, s.vault.keys.loc);
+      await migrateHandle(store, id, s.vault.keys.loc);
+      await unpublishHandle(store, id);
       if (await save((d) => { d.identity = null; }, 'Handle removed')) identity.value = null;
     } catch (e) { toast(`Couldn’t remove: ${e.message}`, { tone: 'danger' }); }
   };

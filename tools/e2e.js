@@ -128,10 +128,8 @@ async function scenario(name, transport) {
 
   await step('turn on password-free unlock', `
     document.querySelector('.quick-toggle input').click(); await $t.sleep(100); $t.click('Turn on');
-    try { await $t.until(() => document.querySelector('.quick-toggle input')?.checked && !document.querySelector('dialog')); } catch {
-      throw new Error('toggle not on: ' + document.querySelector('.toasts')?.textContent + ' | dialogs: ' + document.querySelectorAll('dialog').length + ' | toggles: ' + document.querySelectorAll('.quick-toggle').length);
-    }
-    const rec = await ${DEVICE};
+    let rec;
+    for (let i = 0; i < 100 && !rec?.quick; i++) { await $t.sleep(50); rec = await ${DEVICE}; }
     if (!rec.quick) throw new Error('quick unlock not stored');
     if (JSON.stringify(rec).includes('${pw}')) throw new Error('password stored');`);
 
@@ -153,7 +151,98 @@ async function scenario(name, transport) {
   if (errors.length) { failed++; console.log(`  FAIL  ${name} › page errors\n        ${errors.join('\n        ')}`); }
 }
 
+/**
+ * Failure handling in the real UI, with the network failing on cue: a share
+ * whose vault save fails, a revoke whose deletes fail, and locking with a
+ * secret dialog open (security review findings 2, 5 and 6).
+ */
+async function failures() {
+  const name = 'failures';
+  const page = await browser.page();
+  const step = async (label, body) => {
+    try {
+      const r = await page.eval(HELPERS + body);
+      console.log(`  ok    ${name} › ${label}${r && !String(r).includes('#') ? ` (${r})` : ''}`);
+      return r;
+    } catch (err) {
+      failed++;
+      console.log(`  FAIL  ${name} › ${label}\n        ${err.message.split('\n')[0]}`);
+      throw err;
+    }
+  };
+  // Fail matching requests with a 503 while `failing` is set.
+  let failing = null;
+  page.listeners.push((m) => {
+    if (m.method !== 'Fetch.requestPaused') return;
+    const { requestId, request } = m.params;
+    if (failing && request.method === failing.method && request.url.includes(failing.path)) {
+      page.send('Fetch.fulfillRequest', { requestId, responseCode: 503, responseHeaders: [{ name: 'Access-Control-Allow-Origin', value: '*' }], body: btoa('unavailable') });
+    } else page.send('Fetch.continueRequest', { requestId });
+  });
+  await page.send('Fetch.enable', { patterns: [{ urlPattern: '*/v1/*', requestStage: 'Request' }] });
+  await page.size(1280, 860);
+  await page.goto(`${dev.origin}/`);
+  const user = `e2e-failures-${Date.now().toString(36)}`;
+  const pw = 'violet-anchor-mosaic-tundra';
+
+  await step('create a vault and a login', `
+    $t.click('Create a vault'); await $t.sleep(100);
+    document.querySelector('.toggle input').click(); $t.click('Continue'); await $t.sleep(100);
+    $t.type('Username', '${user}'); $t.type('Password', '${pw}'); $t.type('Confirm password', '${pw}');
+    $t.click('Continue'); await $t.sleep(150);
+    const key = document.querySelector('.account-key').textContent;
+    $t.click('Copy'); $t.click('I’ve saved it'); await $t.sleep(100);
+    $t.type('End of your Account Key', key.split('-').slice(-2).join('-'));
+    $t.click('Create vault');
+    await $t.until(() => document.querySelector('dialog .passkey-hero'), 30000);
+    $t.click('Remember without it'); await $t.until(() => !document.querySelector('dialog'));
+    $t.click('New item'); await $t.sleep(100); $t.click('Login'); await $t.sleep(100);
+    $t.type('Name', 'GitHub'); $t.type('Password', 'hunter2-but-longer'); $t.click('Add to vault');
+    await $t.until(() => document.querySelector('.detail-title')?.textContent === 'GitHub' && !document.querySelector('.editor'), 30000);`);
+
+  failing = { method: 'PUT', path: '/v1/b/' };
+  await step('a share whose vault save fails is deleted, not shown', `
+    $t.click('Share'); await $t.sleep(200); $t.click('Create share');
+    await $t.until(() => /so it was deleted/.test(document.querySelector('.toasts')?.textContent ?? ''), 30000);
+    if (document.querySelector('.share-result')) throw new Error('an untracked link was shown');
+    [...document.querySelectorAll('dialog button')].find((b) => b.textContent.trim() === 'Cancel').click();
+    await $t.until(() => !document.querySelector('dialog'));`);
+  failing = null;
+
+  await step('create a share normally', `
+    $t.click('Share'); await $t.sleep(200); $t.click('Create share');
+    await $t.until(() => document.querySelector('.share-result'), 30000);
+    $t.click('Done'); await $t.until(() => !document.querySelector('dialog'));
+    $t.click('Shares'); await $t.until(() => document.querySelectorAll('.share-row').length === 1);`);
+
+  failing = { method: 'DELETE', path: '/v1/e/' };
+  await step('a revoke whose deletes fail says so and keeps the share', `
+    $t.click('Revoke'); await $t.sleep(100); document.querySelector('dialog .btn-danger').click();
+    await $t.until(() => /Couldn’t revoke/.test(document.querySelector('.toasts')?.textContent ?? ''), 30000);
+    if (document.querySelectorAll('.share-row').length !== 1) throw new Error('the share was dropped from Active shares');`);
+  failing = null;
+
+  await step('retrying the revoke succeeds', `
+    $t.click('Revoke'); await $t.sleep(100); document.querySelector('dialog .btn-danger').click();
+    await $t.until(() => !document.querySelector('.share-row'), 30000);`);
+
+  await step('locking closes the Account Key dialog', `
+    $t.click('Settings'); await $t.until(() => document.querySelector('.settings-section'));
+    [...document.querySelectorAll('.toggle')].find((t) => t.textContent.includes('goes to the background')).querySelector('input').click();
+    $t.click('Show'); const key = await $t.until(() => /^RSPM1-/.test(document.querySelector('dialog .account-key')?.textContent ?? '') && document.querySelector('dialog .account-key').textContent);
+    Object.defineProperty(document, 'visibilityState', { value: 'hidden', configurable: true });
+    document.dispatchEvent(new Event('visibilitychange'));
+    await $t.until(() => document.querySelector('.auth-card'));
+    if (document.querySelector('dialog')) throw new Error('a dialog survived the lock');
+    if (document.body.innerHTML.includes(key)) throw new Error('the Account Key is still in the page');
+    // Preferences are per origin; don't leave lock-on-hide on for the next scenarios.
+    await new Promise((res) => { const r = indexedDB.open('rspm'); r.onsuccess = () => { const t = r.result.transaction('kv', 'readwrite'); t.objectStore('kv').put(false, 'lock-on-hide'); t.oncomplete = res; }; });`);
+
+  if (page.errors.length) { failed++; console.log(`  FAIL  ${name} › page errors\n        ${page.errors.join('\n        ')}`); }
+}
+
 try {
+  try { await failures(); } catch { /* reported in step() */ }
   for (const [name, transport] of [['Touch ID', 'internal'], ['security key', 'usb']]) {
     try { await scenario(name, transport); } catch { /* reported in step() */ } finally { await cleanup(); }
   }

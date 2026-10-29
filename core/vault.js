@@ -193,6 +193,7 @@ export function removeItem(doc, id) {
 
 export class Vault {
   #state;
+  #rollback = null;
 
   constructor(store, keys, state) {
     this.store = store;
@@ -202,6 +203,8 @@ export class Vault {
 
   get gen() { return this.#state.gen; }
   get doc() { return this.#state.doc; }
+  /** A RollbackError if this vault was opened at an older generation than expected (read-only), else null. */
+  get readOnly() { return this.#rollback; }
 
   static async create(store, keys, doc = emptyDoc(), onProgress) {
     if (await store.exists((await headRef(keys, 1)).path)) throw new VaultExistsError();
@@ -210,14 +213,20 @@ export class Vault {
     return new Vault(store, keys, state);
   }
 
-  /** Opens the latest generation. Throws RollbackError if it is older than `minGen`. */
-  static async open(store, keys, { minGen = 0 } = {}) {
+  /**
+   * Opens the latest generation. If it is older than `minGen`, throws
+   * RollbackError — or, with `readOnlyIfOlder`, opens it read-only: every
+   * write then throws that RollbackError (§6.4).
+   */
+  static async open(store, keys, { minGen = 0, readOnlyIfOlder = false } = {}) {
     for (let attempt = 0; ; attempt++) {
       const g = await findLatest(store, keys);
       if (g === 0) throw new VaultNotFoundError();
-      if (g < minGen) throw new RollbackError(g, minGen);
+      if (g < minGen && !readOnlyIfOlder) throw new RollbackError(g, minGen);
       try {
-        return new Vault(store, keys, await loadGeneration(store, keys, g));
+        const v = new Vault(store, keys, await loadGeneration(store, keys, g));
+        if (g < minGen) v.#rollback = new RollbackError(g, minGen);
+        return v;
       } catch (err) {
         // A concurrent save pruned the generation between search and read.
         if (!(err instanceof GoneError) || attempt >= 3) throw err;
@@ -225,10 +234,16 @@ export class Vault {
     }
   }
 
-  /** Re-reads the latest generation from the server. */
+  #writable() {
+    if (this.#rollback) throw this.#rollback;
+  }
+
+  /** Re-reads the latest generation from the server. A read-only vault becomes writable once the expected generation is back. */
   async refresh() {
-    const fresh = await Vault.open(this.store, this.keys, { minGen: this.gen });
+    const minGen = Math.max(this.gen, this.#rollback?.expected ?? 0);
+    const fresh = await Vault.open(this.store, this.keys, { minGen, readOnlyIfOlder: !!this.#rollback });
     this.#state = fresh.#state;
+    this.#rollback = fresh.#rollback;
     return this;
   }
 
@@ -237,6 +252,7 @@ export class Vault {
    * generation. If another device saved first, merges and retries.
    */
   async update(change, onProgress) {
+    this.#writable();
     const local = structuredClone(this.doc);
     await change(local);
     let base = this.#state;
@@ -257,6 +273,7 @@ export class Vault {
 
   /** Deletes every block of this vault (best-effort). Used after a credential change (§7). */
   async destroy() {
+    this.#writable();
     const s = this.#state;
     await prune(this.store, this.keys, s, 0);
     const heads = await Promise.all([...retained(s.gen)].map((g) => headRef(this.keys, g)));
@@ -265,6 +282,7 @@ export class Vault {
 
   /** Moves the vault to new credentials (§7). Returns the new vault. */
   async rekey(newKeys, onProgress) {
+    this.#writable();
     const fresh = await Vault.create(this.store, newKeys, this.doc, onProgress);
     const check = await Vault.open(this.store, newKeys);
     if (JSON.stringify(check.doc) !== JSON.stringify(this.doc)) throw new CorruptVaultError('new vault did not read back');

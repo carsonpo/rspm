@@ -40,10 +40,9 @@ export async function recipientShareRoundTrip() {
   const alice = await createIdentity('Alice');
   const bob = await createIdentity('bob');
   const mallory = await createIdentity('mallory');
-  const loc = random(32);
-  ok(await publishHandle(store, bob, loc), 'publish');
-  ok(await publishHandle(store, bob, loc), 'republish is idempotent');
-  ok(!(await publishHandle(store, { ...mallory, handle: 'bob' }, random(32))), 'handle squatting refused');
+  ok(await publishHandle(store, bob), 'publish');
+  ok(await publishHandle(store, bob), 'republish is idempotent');
+  ok(!(await publishHandle(store, { ...mallory, handle: 'bob' })), 'handle squatting refused');
 
   const rec = await lookupHandle(store, 'BOB');
   ok(rec && /^[A-Z2-7]{4}( [A-Z2-7]{4}){7}$/.test(rec.fingerprint), 'fingerprint format');
@@ -66,7 +65,7 @@ export async function recipientShareRoundTrip() {
   try { await openShare(store, frag, bob); } catch (e) { err = e; }
   ok(err && /expired or was revoked/.test(err.message), 'revoked');
 
-  ok(await unpublishHandle(store, bob, loc), 'unpublish');
+  ok(await unpublishHandle(store, bob), 'unpublish');
   eq(await lookupHandle(store, 'bob'), null);
 }
 

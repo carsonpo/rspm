@@ -253,7 +253,11 @@ harmless generation, which the next save cleans up.
 
 Clients store, per vault, the highest `gen` they have ever verified (in
 IndexedDB). If a later search returns a lower `gen`, the client must show a
-rollback warning and must not save until the user acknowledges it. A brand-new
+rollback warning. The user may choose to view the older generation, but only
+**read-only**: the client must refuse every write (saves, credential changes,
+deletion, and anything that writes shares or handles alongside a save) until a
+refresh finds a generation at or above the stored one. Building on the older
+generation would quietly commit stale data as the next generation. A brand-new
 device has no stored state and cannot detect rollback (THREAT_MODEL R6).
 
 ### 6.5 Finding the latest generation
@@ -326,7 +330,13 @@ delete tokens.
 
 **Burn after reading.** Anyone holding `s` can derive the delete tokens. If
 `burn` is true, the recipient's client deletes the share after a successful
-decrypt.
+decrypt. This is cooperative, **not** single-view enforcement: the share has
+to be read in full before it can be deleted, so a modified client can skip the
+deletion, and clients that open the share at the same time can all read it.
+The server can't do better without seeing who reads what. The app
+describes burn as "deleted from the server once opened" and reports when the
+deletion fails. Deletion failures (other than objects already missing) are
+always reported, never treated as success.
 
 ### 8.2 Link share
 
@@ -348,8 +358,17 @@ separate from, and unrelated to, the login username.
 ```
 handle_norm = NFKC(trim(handle)).toLowerCase(), 3–32 chars of [a-z0-9_-]
 path        = h/{b32(trunc16(H("rspm/v1/handle" ‖ handle_norm)))}
-t_h         = HMAC(loc_key, "handle" ‖ handle_norm)
+t_h         = HKDF(x25519_sk ‖ mlkem_seed, "rspm/v1", "handle-token", 32)
 ```
+
+`t_h` derives from the identity's own secrets, which move with the identity
+when credentials change (§7), so the new vault can still remove or update its
+handle, and nothing about the handle depends on the old credentials.
+Version 1 records used `t_h = locate(loc_key, "handle" ‖ handle_norm).token`.
+Clients upgrade them by **replacing** the record in place (§9.1), authorized
+by the old token, before any credential change and whenever the handle
+settings are opened. A delete followed by a create would leave the handle free
+for someone else to claim in between.
 
 The handle record is **plaintext** (it is public by design), 4096 bytes:
 
@@ -423,6 +442,7 @@ depends on which.
 | `GET` | `/v1/pow` | — | `200 {"d": <bits>, "now": <unix>}` | |
 | `GET`, `HEAD` | `/v1/{path}` | — | `200` + object | `404` |
 | `PUT` | `/v1/{path}` | 4096 bytes | `201` | `400` size/path, `403` PoW/tag, `409` exists, `429` |
+| `PUT` + `RSPM-Replace: hex(t_h)` | `/v1/h/{id}` | 4096 bytes | `200` | `400`, `403` bad token, `404`, `409` changed, `429` |
 | `DELETE` | `/v1/{path}` | 32-byte token | `204` | `403` bad token, `404`, `429` |
 
 - `GET`/`HEAD` are not rate-limited and need no PoW: anyone may read any object.
@@ -436,6 +456,13 @@ depends on which.
 - `PUT` on `h/` checks that the magic is correct and that the handle stored at
   offset 1256 hashes to the path.
 - `PUT` on `e/` checks the `hour` bounds from §8.
+- `PUT` with `RSPM-Replace` is only for handle records. It checks `H(token)`
+  against the existing record's verifier, then writes conditionally on that
+  record's etag (`If-Match`), so the handle is never free in between and two
+  replacements can't interleave.
+- Clients must treat any failed `DELETE` (other than `404`) as a failure and
+  report it. Revoking or burning a share is only complete once every block is
+  gone.
 
 ### 9.2 Proof-of-work (required on PUT and DELETE)
 

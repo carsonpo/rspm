@@ -3,7 +3,7 @@
 //
 // Deliberately logs nothing.
 
-import { equal } from '../../core/encoding.js';
+import { equal, unhex } from '../../core/encoding.js';
 import { sha256 } from '../../core/crypto.js';
 import { verify as verifyPow } from '../../core/powcheck.js';
 import { locatorFromToken } from '../../core/block.js';
@@ -36,7 +36,7 @@ function corsHeaders(origin, env) {
   return {
     'Access-Control-Allow-Origin': origin,
     'Access-Control-Allow-Methods': 'GET, HEAD, PUT, DELETE, OPTIONS',
-    'Access-Control-Allow-Headers': 'Content-Type, RSPM-PoW, RSPM-Tag',
+    'Access-Control-Allow-Headers': 'Content-Type, RSPM-PoW, RSPM-Tag, RSPM-Replace',
     'Access-Control-Max-Age': '86400',
     Vary: 'Origin',
   };
@@ -87,6 +87,8 @@ async function route(request, url, env, deps) {
   if (request.method === 'PUT') {
     const reason = await validate(path, body, Math.floor(now / 3600));
     if (reason) return text(reason, 400);
+    const replace = request.headers.get('RSPM-Replace');
+    if (replace !== null) return replaceHandle(env, parsed, path, body, replace);
     // Atomic create-once: the write only happens if no object exists at `path`.
     const put = await env.BUCKET.put(path, body, { onlyIf: new Headers({ 'If-None-Match': '*' }) });
     return put ? text('created', 201) : text('exists', 409);
@@ -106,6 +108,23 @@ async function route(request, url, env, deps) {
   }
   await env.BUCKET.delete(path);
   return new Response(null, { status: 204 });
+}
+
+/**
+ * Replaces a handle record in place, authorized by the current record's delete
+ * token (hex, in RSPM-Replace). The write is conditional on the record being
+ * unchanged since it was checked, so the handle is never free in between and
+ * two replacements can't interleave (PROTOCOL §8.3.1).
+ */
+async function replaceHandle(env, parsed, path, body, tokenHex) {
+  if (parsed.prefix !== 'h') return text('only handle records can be replaced', 400);
+  if (!/^[0-9a-f]{64}$/.test(tokenHex)) return text('token must be 32 bytes', 400);
+  const obj = await env.BUCKET.get(path);
+  if (!obj) return text('not found', 404);
+  const rec = new Uint8Array(await obj.arrayBuffer());
+  if (!equal(await sha256(unhex(tokenHex)), rec.subarray(1223, 1255))) return text('bad token', 403);
+  const put = await env.BUCKET.put(path, body, { onlyIf: new Headers({ 'If-Match': obj.etag }) });
+  return put ? text('replaced', 200) : text('changed', 409);
 }
 
 /** Hourly cron: delete every e/{hour}/ prefix whose hour has passed (PROTOCOL §9.5). */

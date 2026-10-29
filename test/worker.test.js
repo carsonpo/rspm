@@ -97,7 +97,7 @@ export async function expiringPathsAndCron() {
 export async function handleRecords() {
   const env = testEnv();
   const id = await createIdentity('carson');
-  const rec = await buildHandleRecord(id, random(32));
+  const rec = await buildHandleRecord(id);
   eq((await send(env, 'PUT', await handlePath('someoneelse'), rec)).status, 400, 'record must match path');
   eq((await send(env, 'PUT', await handlePath('carson'), rec)).status, 201);
 }
