@@ -57,8 +57,8 @@ async function route(request, url, env, deps) {
   const parsed = parsePath(path);
   if (!parsed) return text('invalid path', 400);
 
-  // Reads normally go straight to the public bucket; this fallback lets a
-  // self-hosted instance run without a public bucket domain.
+  // Reads: anyone may fetch any object. Clients read through here by default;
+  // a deployment can also expose the bucket on a public domain.
   if (request.method === 'GET' || request.method === 'HEAD') {
     const obj = request.method === 'GET' ? await env.BUCKET.get(path) : await env.BUCKET.head(path);
     if (!obj) return text('not found', 404);

@@ -65,7 +65,7 @@ function bundle(entry) {
 
 export const PRODUCTION = Object.freeze({
   api: 'https://api.rspm.me',
-  blocks: 'https://blocks.rspm.me',
+  blocks: 'https://api.rspm.me/v1',
   link: 'https://rspm.link',
 });
 

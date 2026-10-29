@@ -412,8 +412,9 @@ who doesn't hold the recipient's identity keys.
 ## 9. Worker API
 
 The base URL is `https://api.rspm.me` (configurable for self-hosting). Reads go
-directly to the public bucket domain (`https://blocks.rspm.me/{path}`) and never
-touch the worker.
+through the worker too (`GET`/`HEAD /v1/{path}`). A deployment may instead expose the
+bucket on a public read-only domain and point clients there; nothing in the protocol
+depends on which.
 
 ### 9.1 Endpoints
 
@@ -424,8 +425,7 @@ touch the worker.
 | `PUT` | `/v1/{path}` | 4096 bytes | `201` | `400` size/path, `403` PoW/tag, `409` exists, `429` |
 | `DELETE` | `/v1/{path}` | 32-byte token | `204` | `403` bad token, `404`, `429` |
 
-- `GET`/`HEAD` on the worker is a fallback for self-hosted instances without a
-  public bucket domain. Clients normally read from the bucket directly.
+- `GET`/`HEAD` are not rate-limited and need no PoW: anyone may read any object.
 - Existence checks (`HEAD`) must never be served from a cache, because
   generation discovery (§6.5) depends on fresh answers. Clients append a random
   query string.

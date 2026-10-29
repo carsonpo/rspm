@@ -43,7 +43,6 @@ docs/      PROTOCOL.md, THREAT_MODEL.md.
 |---|---|
 | `rspm.me` | the app (PWA) |
 | `api.rspm.me` | the worker |
-| `blocks.rspm.me` | public R2 bucket (read-only, listing disabled) |
 | `rspm.link` | share links. A 301 redirect to `https://rspm.me/` (browsers keep the `#fragment`, so nothing secret reaches either server) |
 | `reallysimplepasswordmanager.com` | landing page and docs |
 

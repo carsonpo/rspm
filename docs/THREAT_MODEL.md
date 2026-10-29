@@ -31,7 +31,7 @@ disagreement is a bug.
 | The app HTML (`index.html` at rspm.me) | **Yes** | It handles plaintext. It is the only component you have to trust, and you can verify it (see "Verifying the app" below). |
 | Your device and browser | **Yes** | Out of scope (R1). |
 | Worker (`api.rspm.me`) | No | It only creates and deletes opaque 4096-byte objects. Its source is public, but no security property relies on it behaving correctly. |
-| Bucket (`blocks.rspm.me`) | No | Public by design. |
+| Bucket (R2, read via `api.rspm.me/v1`) | No | Public by design. |
 | Cloudflare | No for confidentiality; yes for availability, and yes for app integrity *if you use the hosted copy* | See A3 and A4. |
 | Network | No | TLS is used, but everything is already encrypted end to end. |
 

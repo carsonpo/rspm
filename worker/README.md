@@ -7,8 +7,7 @@ The Cloudflare Worker for `api.rspm.me`. It deliberately does very little:
   create-once write to R2.
 - `DELETE /v1/{path}`: check the delete token, then delete.
 - `GET /v1/pow`: report the current difficulty.
-- `GET`/`HEAD /v1/{path}`: read fallback for self-hosted instances without a
-  public bucket domain.
+- `GET`/`HEAD /v1/{path}`: public reads. This is where clients read blocks from.
 - An hourly cron job that deletes expired `e/{hour}/` prefixes.
 
 No logging. No accounts. No plaintext ever arrives here. The worker is
@@ -28,17 +27,18 @@ npx wrangler deploy           # wrangler is a deploy tool, not a code dependency
 
 Then, in the Cloudflare dashboard:
 
-1. **R2 bucket `rspm-blocks`**: connect the custom domain `blocks.rspm.me` for
-   public reads. Leave the `r2.dev` URL and listing disabled.
-2. **Bucket CORS**: allow `GET` and `HEAD` from `https://rspm.me`.
-3. **Cache rule** for `blocks.rspm.me`: don't cache `404` responses. Clients
-   also send cache-busting queries on `HEAD`, but generation discovery must
-   never see stale "not found" answers.
-4. **`rspm.link`**: a redirect rule `301 → https://rspm.me/`. Browsers keep the
+1. **R2 bucket `rspm-blocks`**, bound to the worker as `BUCKET`. Reads go
+   through the worker, so the bucket needs no domain of its own. Leave listing off.
+2. **Optional public bucket domain.** To serve reads straight from R2, connect a
+   custom domain, allow `GET`/`HEAD` from `https://rspm.me` in the bucket's CORS
+   policy, add a cache rule so `404`s aren't cached (generation discovery must
+   never see a stale "not found"), and build with `blocks` pointing at that domain.
+3. **`rspm.link`**: a redirect rule `301 → https://rspm.me/`. Browsers keep the
    `#fragment` across the redirect, and it never reaches either server.
-5. **`rspm.me`**: serve `dist/rspm.me/` as static assets (committed; no build step).
-   **reallysimplepasswordmanager.com**: serve `dist/reallysimplepasswordmanager.com/`. `_headers` sets
-   `frame-ancestors 'none'` and the other headers that can't go in a `<meta>`.
+4. **`rspm.me`**: serve `dist/rspm.me/` as static assets (committed; no build
+   step). Its `_headers` sets `frame-ancestors 'none'` and the other headers that
+   can't go in a `<meta>`.
+5. **reallysimplepasswordmanager.com**: serve `dist/reallysimplepasswordmanager.com/`.
 
 > **Verify before launch:** the create-once write uses
 > `put(key, body, { onlyIf: new Headers({ 'If-None-Match': '*' }) })`. The tests

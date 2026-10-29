@@ -5,7 +5,7 @@ import { tag } from './tag.js';
 
 export const DEFAULT_ENDPOINTS = Object.freeze({
   api: 'https://api.rspm.me',
-  blocks: 'https://blocks.rspm.me',
+  blocks: 'https://api.rspm.me/v1',
 });
 
 export class StoreError extends Error {
@@ -15,7 +15,7 @@ export class StoreError extends Error {
 export class Store {
   /**
    * @param {{ api: string, blocks: string, fetch?: typeof fetch, onWork?: (n: number) => void }} opts
-   *   blocks: base URL objects are read from (public bucket, or `${api}/v1`).
+   *   blocks: base URL objects are read from: `${api}/v1` (the worker), or a public bucket domain.
    */
   constructor({ api, blocks, fetch: f = globalThis.fetch.bind(globalThis) } = DEFAULT_ENDPOINTS) {
     this.api = api.replace(/\/$/, '');
