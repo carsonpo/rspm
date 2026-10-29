@@ -39,6 +39,12 @@ Then, in the Cloudflare dashboard:
    step). Its `_headers` sets `frame-ancestors 'none'` and the other headers that
    can't go in a `<meta>`.
 5. **reallysimplepasswordmanager.com**: serve `dist/reallysimplepasswordmanager.com/`.
+6. **Turn off everything that rewrites HTML** on both sites: Web Analytics
+   automatic setup (it injects `beacon.min.js`), Rocket Loader, Email Address
+   Obfuscation, and Auto Minify. Each one changes the served bytes. The CSP blocks
+   injected scripts anyway, but the page would no longer match its published hash.
+   Check with `curl -s https://rspm.me/ | shasum -a 256`, which must equal the
+   hash `node tools/build.js` prints.
 
 > **Verify before launch:** the create-once write uses
 > `put(key, body, { onlyIf: new Headers({ 'If-None-Match': '*' }) })`. The tests
