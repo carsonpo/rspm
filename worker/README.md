@@ -36,15 +36,21 @@ Then, in the Cloudflare dashboard:
 3. **`rspm.link`**: a redirect rule `301 → https://rspm.me/`. Browsers keep the
    `#fragment` across the redirect, and it never reaches either server.
 4. **`rspm.me`**: serve `dist/rspm.me/` as static assets (committed; no build
-   step). Its `_headers` sets `frame-ancestors 'none'` and the other headers that
-   can't go in a `<meta>`.
+   step). It carries the headers that can't go in a `<meta>` (`frame-ancestors
+   'none'` and friends) in two formats: `vercel.json` for Vercel (set the
+   project's Root Directory to `dist/rspm.me`) and `_headers` for Cloudflare Pages.
+   Serve the app on the **apex** `rspm.me`; if `www` exists, redirect it to the
+   apex. The worker's CORS (`APP_ORIGINS`), passkeys, and share links are all
+   tied to that exact origin.
 5. **reallysimplepasswordmanager.com**: serve `dist/reallysimplepasswordmanager.com/`.
-6. **Turn off everything that rewrites HTML** on both sites: Web Analytics
+6. **If a site is proxied through Cloudflare** (orange cloud, including in front
+   of Vercel), turn off everything that rewrites HTML: Web Analytics
    automatic setup (it injects `beacon.min.js`), Rocket Loader, Email Address
    Obfuscation, and Auto Minify. Each one changes the served bytes. The CSP blocks
    injected scripts anyway, but the page would no longer match its published hash.
    Check with `curl -s https://rspm.me/ | shasum -a 256`, which must equal the
-   hash `node tools/build.js` prints.
+   hash `node tools/build.js` prints. The simplest fix in front of Vercel is to
+   set those DNS records to DNS-only (grey cloud).
 
 > **Verify before launch:** the create-once write uses
 > `put(key, body, { onlyIf: new Headers({ 'If-None-Match': '*' }) })`. The tests
