@@ -117,13 +117,14 @@ export function VaultView() {
     session.peek().rollback ? Notice({ tone: 'danger', title: 'Showing an older revision', children: 'The server returned an older version of your vault than this device has seen. Saving is disabled.' }) : null,
     () => (items.value.length || query.value
       ? h('ul', { class: 'item-list', role: 'listbox', 'aria-label': 'Items' },
-        list(() => items.value, (i) => i.id, (it) => h('li', { role: 'option', 'aria-selected': () => String(selected.value === it().id && !page.value) },
+        list(() => items.value, (i) => i.id, (it) => h('li', { class: 'item-li', role: 'option', 'aria-selected': () => String(selected.value === it().id && !page.value) },
           h('button', { type: 'button', class: () => ['item-row', selected.value === it().id && !page.value && 'is-selected'], on: { click: () => openItem(it().id) } },
             () => Monogram({ name: it().name, type: it().type }),
             h('span', { class: 'item-row-text' },
               h('span', { class: 'item-row-name' }, () => it().name || 'Untitled'),
-              h('span', { class: 'item-row-sub' }, () => subtitle(it()))),
-            () => (it().type === 'totp' ? TotpCode({ uri: () => it().otpauth, compact: true }) : null)))),
+              h('span', { class: 'item-row-sub' }, () => subtitle(it())))),
+          // Beside the row, not inside it: a button can't hold another button.
+          () => (it().type === 'totp' ? TotpCode({ uri: () => it().otpauth, compact: true }) : null))),
         () => (query.value && !items.value.length ? h('li', { class: 'list-empty muted' }, `No items match “${query.value}”`) : null))
       : h('div', { class: 'list-empty-wrap' }, Empty({
         icon: filter.value === 'all' ? 'inbox' : TYPES[filter.value].icon,

@@ -372,6 +372,18 @@ async function scanning() {
     const subs = [...document.querySelectorAll('.item-row-sub')].map((e) => e.textContent).join();
     if (!subs.includes('Bank & Co · me@example.com')) throw new Error('subtitles: ' + subs);`);
 
+  await step('a code copies straight from the list', `
+    const copied = [];
+    navigator.clipboard.writeText = async (t) => { copied.push(t); };
+    const before = document.querySelector('.detail-title')?.textContent ?? null;
+    const li = [...document.querySelectorAll('.item-li')].find((e) => e.querySelector('.item-row-name')?.textContent === 'Example');
+    await $t.until(() => /^[0-9]{3,4} [0-9]{3,4}$/.test(li.querySelector('.totp-compact')?.textContent.trim() ?? ''), 10000);
+    const shown = li.querySelector('.totp-compact').textContent.trim().replace(' ', '');
+    li.querySelector('.totp-compact').click();
+    await $t.until(() => copied.length, 5000);
+    if (copied[0] !== shown) throw new Error('copied ' + copied[0] + ', showing ' + shown);
+    if ((document.querySelector('.detail-title')?.textContent ?? null) !== before) throw new Error('copying opened the item');`);
+
   await step('locking stops the camera', `
     $t.click('Settings'); await $t.until(() => document.querySelector('.settings-section'));
     [...document.querySelectorAll('.toggle')].find((t) => t.textContent.includes('goes to the background')).querySelector('input').click();

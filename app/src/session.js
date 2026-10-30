@@ -9,7 +9,7 @@ import { Vault, VaultNotFoundError, RollbackError, emptyDoc } from '../../core/v
 import { hex, b64, b64decode } from '../../core/encoding.js';
 import { aesKey, random } from '../../core/crypto.js';
 import {
-  assert, enroll, PasskeyError, passkeyLabel, wrapDeviceKey, unwrapDeviceKey, escrowDeviceKey, recoverDeviceKey,
+  assert, enroll, PasskeyError, wrapDeviceKey, unwrapDeviceKey, escrowDeviceKey, recoverDeviceKey,
   sealSecrets, openSecrets, unwrapLegacyAccountKey,
 } from './passkey.js';
 
@@ -105,7 +105,7 @@ export async function signIn({ username, password, accountKey, rememberKey, allo
   let stored = null;
   if (!key && (rec?.passkeys?.length || rec?.passkey)) {
     // Ask the authenticator first, while the click that started this still counts as a user gesture.
-    onStep(`Waiting for ${passkeyLabel(rec.passkeys ?? rec.passkey)}`);
+    onStep('Waiting for passkey');
     try { stored = await unlockWithPasskey(rec, saltHex); } catch (err) {
       throw new SignInError(err instanceof PasskeyError ? `${err.message}. You can sign in with your Account Key instead.` : err.message);
     }

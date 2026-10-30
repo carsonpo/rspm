@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
-<meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'sha256-UJCpeeVgRcKhEWgdzuLGwXrt9BO5bZuq2oDtnlhr2X4=' 'wasm-unsafe-eval'; style-src 'sha256-mqkfiaJGAHR8EpT/rJy5m5CmzIyf8bxZmEfFJ07tSMU='; connect-src https://api.rspm.me; img-src data: 'self'; manifest-src 'self'; worker-src 'self'; base-uri 'none'; form-action 'none'; require-trusted-types-for 'script'; trusted-types rspm-sw">
+<meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'sha256-vQptYZxuGf7npAP4tt/olTdan6CKoaRlVaw2NOo4VYI=' 'wasm-unsafe-eval'; style-src 'sha256-604soCL/fYDdyQwv5IYxXW8/DFKDd8/0XVXxVAJw0NI='; connect-src https://api.rspm.me; img-src data: 'self'; manifest-src 'self'; worker-src 'self'; base-uri 'none'; form-action 'none'; require-trusted-types-for 'script'; trusted-types rspm-sw">
 <meta name="referrer" content="no-referrer">
 <meta name="color-scheme" content="light dark">
 <meta name="theme-color" content="#f6f6f3" media="(prefers-color-scheme: light)">
@@ -391,13 +391,13 @@ code { background: var(--surface-2); padding: 0.1em 0.35em; border-radius: var(-
 .search-kbd { font-size: var(--t-xs); padding: 1px 6px; border-radius: 4px; border: 1px solid var(--border-strong); color: var(--text-3); }
 
 .item-list { flex: 1; overflow-y: auto; padding: 0 var(--s2) var(--s4); overscroll-behavior: contain; }
+.item-li { display: flex; align-items: center; border-radius: var(--r); transition: background var(--fast) var(--ease); }
+.item-li:hover { background: var(--surface-2); }
+.item-li:has(> .item-row.is-selected) { background: var(--accent-soft); }
 .item-row {
-  display: flex; align-items: center; gap: var(--s3); width: 100%; padding: 10px var(--s3);
+  display: flex; align-items: center; gap: var(--s3); flex: 1; min-width: 0; padding: 10px var(--s3);
   border: 0; border-radius: var(--r); background: none; text-align: left;
-  transition: background var(--fast) var(--ease);
 }
-.item-row:hover { background: var(--surface-2); }
-.item-row.is-selected { background: var(--accent-soft); }
 .item-row:focus-visible { outline: none; box-shadow: inset 0 0 0 2px var(--accent); }
 .item-row-text { flex: 1; min-width: 0; display: flex; flex-direction: column; }
 .item-row-name { font-weight: 560; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
@@ -459,7 +459,14 @@ code { background: var(--surface-2); padding: 0.1em 0.35em; border-radius: var(-
 .totp-ring-track { fill: none; stroke: var(--surface-3); stroke-width: 2.5; }
 .totp-ring-fill { fill: none; stroke: var(--accent); stroke-width: 2.5; stroke-linecap: round; transition: stroke-dashoffset 1s linear, stroke var(--med) var(--ease); }
 .totp-ring-fill.is-low { stroke: var(--danger); }
-.totp-compact { display: inline-flex; align-items: center; gap: 6px; font: 560 var(--t-sm)/1 var(--mono); color: var(--text-2); font-variant-numeric: tabular-nums; }
+.totp-compact {
+  display: inline-flex; align-items: center; gap: 6px; flex: none; margin-right: var(--s2); padding: 8px;
+  border: 0; border-radius: var(--r-sm); background: none;
+  font: 560 var(--t-sm)/1 var(--mono); color: var(--text-2); font-variant-numeric: tabular-nums;
+  transition: background var(--fast) var(--ease), color var(--fast) var(--ease);
+}
+.totp-compact:hover { background: var(--surface-3); color: var(--text); }
+.totp-compact:focus-visible { outline: none; box-shadow: 0 0 0 3px var(--ring); }
 
 /* Editor */
 .editor { display: flex; flex-direction: column; gap: var(--s5); }
@@ -2394,7 +2401,7 @@ const { deriveKeys, salt } = $m12;
 const { Vault, VaultNotFoundError, RollbackError, emptyDoc } = $m14;
 const { hex, b64, b64decode } = $m4;
 const { aesKey, random } = $m5;
-const { assert, enroll, PasskeyError, passkeyLabel, wrapDeviceKey, unwrapDeviceKey, escrowDeviceKey, recoverDeviceKey, sealSecrets, openSecrets, unwrapLegacyAccountKey } = $m15;
+const { assert, enroll, PasskeyError, wrapDeviceKey, unwrapDeviceKey, escrowDeviceKey, recoverDeviceKey, sealSecrets, openSecrets, unwrapLegacyAccountKey } = $m15;
 const config = globalThis.RSPM_CONFIG ?? {
   api: location.origin, blocks: `${location.origin}/v1`, link: location.origin, version: 'dev',
 };
@@ -2487,7 +2494,7 @@ async function signIn({ username, password, accountKey, rememberKey, allowRollba
   let stored = null;
   if (!key && (rec?.passkeys?.length || rec?.passkey)) {
     // Ask the authenticator first, while the click that started this still counts as a user gesture.
-    onStep(`Waiting for ${passkeyLabel(rec.passkeys ?? rec.passkey)}`);
+    onStep('Waiting for passkey');
     try { stored = await unlockWithPasskey(rec, saltHex); } catch (err) {
       throw new SignInError(err instanceof PasskeyError ? `${err.message}. You can sign in with your Account Key instead.` : err.message);
     }
@@ -4608,8 +4615,10 @@ function TotpCode({ uri, compact = false }) {
       'stroke-dasharray': C, 'stroke-dashoffset': () => (state.value ? C * (1 - state.value.remaining / state.value.period) : C),
       transform: `rotate(-90 ${R + 2} ${R + 2})`,
     }));
+  const copyCode = () => state.peek() && copy(state.peek().code, 'Code copied', { sensitive: false });
   if (compact) {
-    return h('span', { class: 'totp-compact' }, () => (state.value ? fmt(state.value.code) : '··· ···'), ring());
+    return h('button', { type: 'button', class: 'totp-compact', title: 'Copy code', 'aria-label': 'Copy code', on: { click: copyCode } },
+      () => (state.value ? fmt(state.value.code) : '··· ···'), ring(), icon('copy', 14));
   }
   return h('div', { class: 'totp' },
     () => (err.value
@@ -4617,10 +4626,10 @@ function TotpCode({ uri, compact = false }) {
       : h('div', { class: 'totp-main' },
         h('button', {
           type: 'button', class: () => ['totp-code', state.value?.remaining <= 5 && 'is-low'], title: 'Copy code',
-          on: { click: () => state.peek() && copy(state.peek().code, 'Code copied', { sensitive: false }) },
+          on: { click: copyCode },
         }, () => (state.value ? fmt(state.value.code) : '··· ···')),
         h('div', { class: 'totp-meta' }, ring(), h('span', null, () => (state.value ? `${state.value.remaining}s` : ''))),
-        IconButton({ icon: 'copy', label: 'Copy code', onClick: () => state.peek() && copy(state.peek().code, 'Code copied', { sensitive: false }) }))));
+        IconButton({ icon: 'copy', label: 'Copy code', onClick: copyCode }))));
 }
 
 // ── Detail view ─────────────────────────────────────────────────────────────
@@ -6127,13 +6136,14 @@ function VaultView() {
     session.peek().rollback ? Notice({ tone: 'danger', title: 'Showing an older revision', children: 'The server returned an older version of your vault than this device has seen. Saving is disabled.' }) : null,
     () => (items.value.length || query.value
       ? h('ul', { class: 'item-list', role: 'listbox', 'aria-label': 'Items' },
-        list(() => items.value, (i) => i.id, (it) => h('li', { role: 'option', 'aria-selected': () => String(selected.value === it().id && !page.value) },
+        list(() => items.value, (i) => i.id, (it) => h('li', { class: 'item-li', role: 'option', 'aria-selected': () => String(selected.value === it().id && !page.value) },
           h('button', { type: 'button', class: () => ['item-row', selected.value === it().id && !page.value && 'is-selected'], on: { click: () => openItem(it().id) } },
             () => Monogram({ name: it().name, type: it().type }),
             h('span', { class: 'item-row-text' },
               h('span', { class: 'item-row-name' }, () => it().name || 'Untitled'),
-              h('span', { class: 'item-row-sub' }, () => subtitle(it()))),
-            () => (it().type === 'totp' ? TotpCode({ uri: () => it().otpauth, compact: true }) : null)))),
+              h('span', { class: 'item-row-sub' }, () => subtitle(it())))),
+          // Beside the row, not inside it: a button can't hold another button.
+          () => (it().type === 'totp' ? TotpCode({ uri: () => it().otpauth, compact: true }) : null))),
         () => (query.value && !items.value.length ? h('li', { class: 'list-empty muted' }, `No items match “${query.value}”`) : null))
       : h('div', { class: 'list-empty-wrap' }, Empty({
         icon: filter.value === 'all' ? 'inbox' : TYPES[filter.value].icon,

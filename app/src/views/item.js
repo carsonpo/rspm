@@ -61,8 +61,10 @@ export function TotpCode({ uri, compact = false }) {
       'stroke-dasharray': C, 'stroke-dashoffset': () => (state.value ? C * (1 - state.value.remaining / state.value.period) : C),
       transform: `rotate(-90 ${R + 2} ${R + 2})`,
     }));
+  const copyCode = () => state.peek() && copy(state.peek().code, 'Code copied', { sensitive: false });
   if (compact) {
-    return h('span', { class: 'totp-compact' }, () => (state.value ? fmt(state.value.code) : '··· ···'), ring());
+    return h('button', { type: 'button', class: 'totp-compact', title: 'Copy code', 'aria-label': 'Copy code', on: { click: copyCode } },
+      () => (state.value ? fmt(state.value.code) : '··· ···'), ring(), icon('copy', 14));
   }
   return h('div', { class: 'totp' },
     () => (err.value
@@ -70,10 +72,10 @@ export function TotpCode({ uri, compact = false }) {
       : h('div', { class: 'totp-main' },
         h('button', {
           type: 'button', class: () => ['totp-code', state.value?.remaining <= 5 && 'is-low'], title: 'Copy code',
-          on: { click: () => state.peek() && copy(state.peek().code, 'Code copied', { sensitive: false }) },
+          on: { click: copyCode },
         }, () => (state.value ? fmt(state.value.code) : '··· ···')),
         h('div', { class: 'totp-meta' }, ring(), h('span', null, () => (state.value ? `${state.value.remaining}s` : ''))),
-        IconButton({ icon: 'copy', label: 'Copy code', onClick: () => state.peek() && copy(state.peek().code, 'Code copied', { sensitive: false }) }))));
+        IconButton({ icon: 'copy', label: 'Copy code', onClick: copyCode }))));
 }
 
 // ── Detail view ─────────────────────────────────────────────────────────────
