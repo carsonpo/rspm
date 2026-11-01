@@ -55,9 +55,18 @@ async function remember(saltHex, username, { accountKey, rememberKey, gen }) {
   if (rememberKey === false && (await idb.get('last-username')) === username) await idb.del('last-username');
 }
 
-function start(username, vault, accountKey, saltHex, extra = {}) {
+// Counts locks. Work that began before a lock — a sign-in waiting on the
+// network, say — must not open the vault once it finishes.
+let locks = 0;
+/** How many times rspm has locked. Pass it as `since` to work that may finish after a lock. */
+export const lockCount = () => locks;
+
+/** Opens the session, unless rspm has locked since `since` (a `locks` count). Returns whether it opened. */
+function start(since, username, vault, accountKey, saltHex, extra = {}) {
+  if (since !== locks) return false;
   session.value = { username, vault, accountKey, saltHex, ...extra };
   doc.value = vault.doc;
+  return true;
 }
 
 const vaultKeys = async ({ loc, encRaw }) => ({ loc, enc: await aesKey(encRaw), encRaw });
@@ -96,9 +105,10 @@ async function writeProtection(saltHex, { accountKey, keys, dk, prfSalt, passkey
  * Signs in. `accountKey` is null to use this device's remembered key.
  * `rememberKey` is true/false to change what the device remembers, or
  * undefined to leave it alone. `password` may be empty when this device has
- * password-free unlock.
+ * password-free unlock. `since` is the lockCount() when the user asked to
+ * sign in: if rspm locks after that, the vault stays closed.
  */
-export async function signIn({ username, password, accountKey, rememberKey, allowRollback = false }, onStep = () => {}) {
+export async function signIn({ username, password, accountKey, rememberKey, allowRollback = false, since = locks }, onStep = () => {}) {
   const saltHex = hex(await salt(username));
   const rec = await idb.get(deviceKey(saltHex));
   let key = accountKey ?? (rec?.akey ? b64decode(rec.akey) : null);
@@ -135,17 +145,18 @@ export async function signIn({ username, password, accountKey, rememberKey, allo
     const pk = { id: rec.passkey.id, kind: rec.passkey.kind, created: rec.passkey.created, ...(await wrapDeviceKey(stored.legacyPrf, dk, saltHex)) };
     await writeProtection(saltHex, { accountKey: key, keys, dk, prfSalt: b64decode(rec.passkey.salt), passkeys: [pk], quick: false });
   }
-  start(username, vault, key, saltHex, { rollback: !!vault.readOnly });
+  if (!start(since, username, vault, key, saltHex, { rollback: !!vault.readOnly })) throw new SignInError('rspm locked before your vault opened. Sign in again.');
 }
 
 export async function createAccount({ username, password, accountKey, rememberKey }, onStep = () => {}, onProgress) {
+  const since = locks;
   const saltHex = hex(await salt(username));
   onStep('Deriving your keys');
   const keys = await deriveKeys(username, password, accountKey);
   onStep('Creating your vault');
   const vault = await Vault.create(store, keys, emptyDoc(), onProgress);
   await remember(saltHex, username, { accountKey, rememberKey, gen: vault.gen });
-  start(username, vault, accountKey, saltHex);
+  if (!start(since, username, vault, accountKey, saltHex)) throw new SignInError('Your vault was created, but rspm locked before it opened. Sign in to open it.');
 }
 
 /**
@@ -167,7 +178,7 @@ export async function save(change, message = 'Saved') {
   saving.value = { done: 0, total: 1 };
   try {
     await s.vault.update(change, (done, total) => { saving.value = { done, total }; });
-    doc.value = s.vault.doc;
+    if (session.peek() === s) doc.value = s.vault.doc;
     await remember(s.saltHex, s.username, { gen: s.vault.gen });
     if (message) toast(message);
     return true;
@@ -186,6 +197,7 @@ export async function refresh() {
   if (!s || saving.peek()) return;
   try {
     await s.vault.refresh();
+    if (session.peek() !== s) return; // locked meanwhile
     if (!!s.vault.readOnly !== !!s.rollback) session.value = { ...s, rollback: !!s.vault.readOnly };
     doc.value = s.vault.doc;
     await remember(s.saltHex, s.username, { gen: s.vault.gen });
@@ -198,11 +210,12 @@ export async function refresh() {
  * Replaces the session's vault after a credential change. With the same
  * username, whatever this device remembers is carried over to the new key and
  * vault keys (passkeys stay registered). A new username starts a new device
- * record, remembered plainly only if `rememberPlainly`.
+ * record, remembered plainly only if `rememberPlainly`. `old` is the session
+ * the change started from; the new vault opens only if it is still current.
  */
-export async function replaceVault(username, vault, accountKey, rememberPlainly) {
+export async function replaceVault(old, username, vault, accountKey, rememberPlainly) {
+  const since = locks;
   const saltHex = hex(await salt(username));
-  const old = session.peek();
   const rec = await idb.get(deviceKey(saltHex));
   if (old && old.saltHex === saltHex && rec) {
     // The new vault's revisions start again from its own first head.
@@ -218,7 +231,7 @@ export async function replaceVault(username, vault, accountKey, rememberPlainly)
     if (old) await idb.del(deviceKey(old.saltHex));
     await remember(saltHex, username, { accountKey, rememberKey: rememberPlainly ? true : undefined, gen: vault.gen });
   }
-  start(username, vault, accountKey, saltHex);
+  if (session.peek() === old) start(since, username, vault, accountKey, saltHex); // stays locked if rspm locked meanwhile
 }
 
 /**
@@ -272,6 +285,7 @@ export async function forgetDevice() {
 }
 
 export function lock() {
+  locks++;
   closeAllDialogs();
   session.value = null;
   doc.value = null;

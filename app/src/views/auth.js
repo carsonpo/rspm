@@ -3,7 +3,7 @@
 import { h, signal, effect, when, computed } from '../ui.js';
 import { icon } from '../icons.js';
 import { Button, Field, Input, PasswordInput, Toggle, Notice, Progress, copy, confirmDialog, id } from '../components.js';
-import { signIn, createAccount, deviceRecord, lastUsername, remembersKey, quickUnlock, SignInError } from '../session.js';
+import { signIn, createAccount, deviceRecord, lastUsername, remembersKey, quickUnlock, SignInError, lockCount } from '../session.js';
 import { printKit, kitText, download } from '../kit.js';
 import { generatePassphrase } from '../generator.js';
 import { StrengthMeter, strongEnough } from './strength.js';
@@ -67,6 +67,7 @@ export function SignIn({ onCreate, notice }) {
   const quick = () => hasDeviceKey() && quickUnlock(device.value) && !usePassword.value;
 
   const submit = async (allowRollback = false) => {
+    const since = lockCount();
     error.value = null;
     if (!username.peek().trim()) { error.value = 'Enter your username'; return; }
     if (!quick() && !password.peek()) { error.value = 'Enter your password'; return; }
@@ -83,7 +84,7 @@ export function SignIn({ onCreate, notice }) {
       await signIn({
         username: username.peek(), password: quick() ? '' : password.peek(), accountKey: key,
         // With passkey protection the key is stored only after the passkey is set up.
-        rememberKey: key ? rememberKey.peek() && !wantPasskey : undefined, allowRollback,
+        rememberKey: key ? rememberKey.peek() && !wantPasskey : undefined, allowRollback, since,
       }, (s) => { step.value = s; });
       if (wantPasskey) offerPasskeySetup({ fallbackPlain: true });
     } catch (e) {

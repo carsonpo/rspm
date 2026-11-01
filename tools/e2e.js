@@ -401,6 +401,36 @@ async function scanning() {
     if (!streams[0].getTracks().every((t) => t.readyState === 'ended')) throw new Error('the camera is still running');
     await new Promise((res) => { const r = indexedDB.open('rspm'); r.onsuccess = () => { const t = r.result.transaction('kv', 'readwrite'); t.objectStore('kv').put(false, 'lock-on-hide'); t.oncomplete = res; }; });`);
 
+  // Lock-on-hide is still on for this page. Hiding it right after clicking
+  // Unlock locks again while the sign-in is still working.
+  await step('a sign-in interrupted by going to the background stays locked', `
+    Object.defineProperty(document, 'visibilityState', { value: 'visible', configurable: true });
+    $t.type('Username', '${user}'); await $t.until(() => document.querySelector('.remembered-key'));
+    $t.type('Password', '${pw}'); $t.click('Unlock');
+    Object.defineProperty(document, 'visibilityState', { value: 'hidden', configurable: true });
+    document.dispatchEvent(new Event('visibilitychange'));
+    await $t.until(() => /locked before your vault opened/.test($t.text()), 60000);
+    await $t.sleep(500);
+    if (!document.querySelector('.auth-card') || document.querySelector('.item-list')) throw new Error('the vault opened after the lock');`);
+
+  await step('then unlocks normally', `
+    Object.defineProperty(document, 'visibilityState', { value: 'visible', configurable: true });
+    $t.type('Password', '${pw}'); $t.click('Unlock');
+    await $t.until(() => document.querySelector('.item-list'), 60000);`);
+
+  await step('a screenshot still decoding when rspm locks opens nothing', `
+    const decode = window.createImageBitmap;
+    let started = false;
+    window.createImageBitmap = (f) => { started = true; return new Promise((res, rej) => setTimeout(() => decode(f).then(res, rej), 1500)); };
+    $t.click('New item'); await $t.sleep(100); $t.click('Two-factor code'); await $t.sleep(100);
+    $t.click('From a screenshot');
+    await $t.until(() => started, 10000);
+    $t.click('Lock');
+    await $t.sleep(3000);
+    window.createImageBitmap = decode;
+    if (!document.querySelector('.auth-card')) throw new Error('not locked');
+    if (document.querySelector('dialog') || /accounts in this export/.test($t.text())) throw new Error('the account chooser opened after the lock');`);
+
   if (page.errors.length) { failed++; console.log(`  FAIL  ${name} › page errors\n        ${page.errors.join('\n        ')}`); }
 }
 

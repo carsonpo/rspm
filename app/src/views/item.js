@@ -5,6 +5,7 @@ import { icon } from '../icons.js';
 import { Button, IconButton, Field, Input, Textarea, PasswordInput, ValueRow, Monogram, Notice, Toggle, Segmented, DialogHeader, openDialog, copy, id, now, toast } from '../components.js';
 import { generatePassword, generatePassphrase, passwordBits, passphraseBits } from '../generator.js';
 import { totp, parseOtpauth, parseMigration } from '../../../core/totp.js';
+import { shellQuote, dotenvValue } from '../quote.js';
 import { cameraAvailable, scanWithCamera, scanFromImage } from './scan.js';
 
 export const TYPES = {
@@ -113,8 +114,8 @@ export function ItemFields({ item }) {
 }
 
 export function EnvTools({ item }) {
-  const dotenv = () => Object.entries(item.vars ?? {}).map(([k, v]) => `${k}=${/[\s"'#$]/.test(v) ? JSON.stringify(v) : v}`).join('\n');
-  const cli = `rspm run --env ${JSON.stringify(item.name).replace(/^"(.*)"$/, /\s/.test(item.name) ? '"$1"' : '$1')} -- npm start`;
+  const dotenv = () => Object.entries(item.vars ?? {}).map(([k, v]) => `${k}=${dotenvValue(v)}`).join('\n');
+  const cli = `rspm run --env ${shellQuote(item.name)} -- npm start`;
   return h('section', { class: 'panel' },
     h('h2', { class: 'panel-title' }, 'Use these variables'),
     h('div', { class: 'button-row' },
@@ -192,13 +193,16 @@ function chooseAccount({ accounts, skipped }, onImport) {
 
 /** "Scan QR code" and "From a screenshot". `onCode(text)` gets an accepted code. */
 function ScanButtons({ onCode }) {
-  const fail = (msg) => toast(msg, { tone: 'danger', ms: 5000 });
+  // A scan can finish after the editor has gone (rspm locked while an image was decoding): drop it.
+  let alive = true;
+  onCleanup(() => { alive = false; });
+  const fail = (msg) => { if (alive) toast(msg, { tone: 'danger', ms: 5000 }); };
   const camera = cameraAvailable();
   return h('div', { class: 'button-row scan-buttons' },
-    camera ? Button({ label: 'Scan QR code', icon: 'camera', size: 'sm', onClick: async () => { const t = await scanWithCamera(setupCodeProblem); if (t) onCode(t); } }) : null,
+    camera ? Button({ label: 'Scan QR code', icon: 'camera', size: 'sm', onClick: async () => { const t = await scanWithCamera(setupCodeProblem); if (t && alive) onCode(t); } }) : null,
     Button({
       label: camera ? 'From a screenshot' : 'Scan a QR code image', icon: 'image', size: 'sm', kind: camera ? 'ghost' : 'secondary',
-      onClick: async () => { const t = await scanFromImage(setupCodeProblem, fail); if (t) onCode(t); },
+      onClick: async () => { const t = await scanFromImage(setupCodeProblem, fail); if (t && alive) onCode(t); },
     }));
 }
 

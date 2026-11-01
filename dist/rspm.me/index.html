@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
-<meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'sha256-vQptYZxuGf7npAP4tt/olTdan6CKoaRlVaw2NOo4VYI=' 'wasm-unsafe-eval'; style-src 'sha256-604soCL/fYDdyQwv5IYxXW8/DFKDd8/0XVXxVAJw0NI='; connect-src https://api.rspm.me; img-src data: 'self'; manifest-src 'self'; worker-src 'self'; base-uri 'none'; form-action 'none'; require-trusted-types-for 'script'; trusted-types rspm-sw">
+<meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'sha256-l4ZnYcyr82Gr/74+o4+ygHjyMrTlWPCAW9F3lV+8dXQ=' 'wasm-unsafe-eval'; style-src 'sha256-604soCL/fYDdyQwv5IYxXW8/DFKDd8/0XVXxVAJw0NI='; connect-src https://api.rspm.me; img-src data: 'self'; manifest-src 'self'; worker-src 'self'; base-uri 'none'; form-action 'none'; require-trusted-types-for 'script'; trusted-types rspm-sw">
 <meta name="referrer" content="no-referrer">
 <meta name="color-scheme" content="light dark">
 <meta name="theme-color" content="#f6f6f3" media="(prefers-color-scheme: light)">
@@ -2444,9 +2444,18 @@ async function remember(saltHex, username, { accountKey, rememberKey, gen }) {
   if (rememberKey === false && (await idb.get('last-username')) === username) await idb.del('last-username');
 }
 
-function start(username, vault, accountKey, saltHex, extra = {}) {
+// Counts locks. Work that began before a lock — a sign-in waiting on the
+// network, say — must not open the vault once it finishes.
+let locks = 0;
+/** How many times rspm has locked. Pass it as `since` to work that may finish after a lock. */
+const lockCount = () => locks;
+
+/** Opens the session, unless rspm has locked since `since` (a `locks` count). Returns whether it opened. */
+function start(since, username, vault, accountKey, saltHex, extra = {}) {
+  if (since !== locks) return false;
   session.value = { username, vault, accountKey, saltHex, ...extra };
   doc.value = vault.doc;
+  return true;
 }
 
 const vaultKeys = async ({ loc, encRaw }) => ({ loc, enc: await aesKey(encRaw), encRaw });
@@ -2485,9 +2494,10 @@ async function writeProtection(saltHex, { accountKey, keys, dk, prfSalt, passkey
  * Signs in. `accountKey` is null to use this device's remembered key.
  * `rememberKey` is true/false to change what the device remembers, or
  * undefined to leave it alone. `password` may be empty when this device has
- * password-free unlock.
+ * password-free unlock. `since` is the lockCount() when the user asked to
+ * sign in: if rspm locks after that, the vault stays closed.
  */
-async function signIn({ username, password, accountKey, rememberKey, allowRollback = false }, onStep = () => {}) {
+async function signIn({ username, password, accountKey, rememberKey, allowRollback = false, since = locks }, onStep = () => {}) {
   const saltHex = hex(await salt(username));
   const rec = await idb.get(deviceKey(saltHex));
   let key = accountKey ?? (rec?.akey ? b64decode(rec.akey) : null);
@@ -2524,17 +2534,18 @@ async function signIn({ username, password, accountKey, rememberKey, allowRollba
     const pk = { id: rec.passkey.id, kind: rec.passkey.kind, created: rec.passkey.created, ...(await wrapDeviceKey(stored.legacyPrf, dk, saltHex)) };
     await writeProtection(saltHex, { accountKey: key, keys, dk, prfSalt: b64decode(rec.passkey.salt), passkeys: [pk], quick: false });
   }
-  start(username, vault, key, saltHex, { rollback: !!vault.readOnly });
+  if (!start(since, username, vault, key, saltHex, { rollback: !!vault.readOnly })) throw new SignInError('rspm locked before your vault opened. Sign in again.');
 }
 
 async function createAccount({ username, password, accountKey, rememberKey }, onStep = () => {}, onProgress) {
+  const since = locks;
   const saltHex = hex(await salt(username));
   onStep('Deriving your keys');
   const keys = await deriveKeys(username, password, accountKey);
   onStep('Creating your vault');
   const vault = await Vault.create(store, keys, emptyDoc(), onProgress);
   await remember(saltHex, username, { accountKey, rememberKey, gen: vault.gen });
-  start(username, vault, accountKey, saltHex);
+  if (!start(since, username, vault, accountKey, saltHex)) throw new SignInError('Your vault was created, but rspm locked before it opened. Sign in to open it.');
 }
 
 /**
@@ -2556,7 +2567,7 @@ async function save(change, message = 'Saved') {
   saving.value = { done: 0, total: 1 };
   try {
     await s.vault.update(change, (done, total) => { saving.value = { done, total }; });
-    doc.value = s.vault.doc;
+    if (session.peek() === s) doc.value = s.vault.doc;
     await remember(s.saltHex, s.username, { gen: s.vault.gen });
     if (message) toast(message);
     return true;
@@ -2575,6 +2586,7 @@ async function refresh() {
   if (!s || saving.peek()) return;
   try {
     await s.vault.refresh();
+    if (session.peek() !== s) return; // locked meanwhile
     if (!!s.vault.readOnly !== !!s.rollback) session.value = { ...s, rollback: !!s.vault.readOnly };
     doc.value = s.vault.doc;
     await remember(s.saltHex, s.username, { gen: s.vault.gen });
@@ -2587,11 +2599,12 @@ async function refresh() {
  * Replaces the session's vault after a credential change. With the same
  * username, whatever this device remembers is carried over to the new key and
  * vault keys (passkeys stay registered). A new username starts a new device
- * record, remembered plainly only if `rememberPlainly`.
+ * record, remembered plainly only if `rememberPlainly`. `old` is the session
+ * the change started from; the new vault opens only if it is still current.
  */
-async function replaceVault(username, vault, accountKey, rememberPlainly) {
+async function replaceVault(old, username, vault, accountKey, rememberPlainly) {
+  const since = locks;
   const saltHex = hex(await salt(username));
-  const old = session.peek();
   const rec = await idb.get(deviceKey(saltHex));
   if (old && old.saltHex === saltHex && rec) {
     // The new vault's revisions start again from its own first head.
@@ -2607,7 +2620,7 @@ async function replaceVault(username, vault, accountKey, rememberPlainly) {
     if (old) await idb.del(deviceKey(old.saltHex));
     await remember(saltHex, username, { accountKey, rememberKey: rememberPlainly ? true : undefined, gen: vault.gen });
   }
-  start(username, vault, accountKey, saltHex);
+  if (session.peek() === old) start(since, username, vault, accountKey, saltHex); // stays locked if rspm locked meanwhile
 }
 
 /**
@@ -2661,11 +2674,12 @@ async function forgetDevice() {
 }
 
 function lock() {
+  locks++;
   closeAllDialogs();
   session.value = null;
   doc.value = null;
 }
-return { config, store, session, doc, saving, SignInError, deviceRecord, remembersKey, quickUnlock, lastUsername, signIn, createAccount, writable, save, refresh, replaceVault, addPasskey, removePasskey, setQuickUnlock, rememberPlain, forgetDevice, lock };
+return { config, store, session, doc, saving, SignInError, deviceRecord, remembersKey, quickUnlock, lastUsername, lockCount, signIn, createAccount, writable, save, refresh, replaceVault, addPasskey, removePasskey, setQuickUnlock, rememberPlain, forgetDevice, lock };
 })();
 
 // app/src/build-info.js
@@ -3212,7 +3226,7 @@ const $m24 = (() => {
 const { h, signal, effect, when, computed } = $m0;
 const { icon } = $m1;
 const { Button, Field, Input, PasswordInput, Toggle, Notice, Progress, copy, confirmDialog, id } = $m2;
-const { signIn, createAccount, deviceRecord, lastUsername, remembersKey, quickUnlock, SignInError } = $m16;
+const { signIn, createAccount, deviceRecord, lastUsername, remembersKey, quickUnlock, SignInError, lockCount } = $m16;
 const { printKit, kitText, download } = $m18;
 const { generatePassphrase } = $m20;
 const { StrengthMeter, strongEnough } = $m21;
@@ -3275,6 +3289,7 @@ function SignIn({ onCreate, notice }) {
   const quick = () => hasDeviceKey() && quickUnlock(device.value) && !usePassword.value;
 
   const submit = async (allowRollback = false) => {
+    const since = lockCount();
     error.value = null;
     if (!username.peek().trim()) { error.value = 'Enter your username'; return; }
     if (!quick() && !password.peek()) { error.value = 'Enter your password'; return; }
@@ -3291,7 +3306,7 @@ function SignIn({ onCreate, notice }) {
       await signIn({
         username: username.peek(), password: quick() ? '' : password.peek(), accountKey: key,
         // With passkey protection the key is stored only after the passkey is set up.
-        rememberKey: key ? rememberKey.peek() && !wantPasskey : undefined, allowRollback,
+        rememberKey: key ? rememberKey.peek() && !wantPasskey : undefined, allowRollback, since,
       }, (s) => { step.value = s; });
       if (wantPasskey) offerPasskeySetup({ fallbackPlain: true });
     } catch (e) {
@@ -3603,8 +3618,27 @@ function* protobufFields(b) {
 return { decodeSecret, parseOtpauth, hotp, totp, encodeSecret, parseMigration };
 })();
 
-// core/qr.js
+// app/src/quote.js
 const $m26 = (() => {
+// Quoting for text the app suggests copying into a terminal or a .env file.
+// Item names and values can come from someone else's share, so they must
+// always arrive as literal text, never as shell syntax.
+
+const PLAIN = /^[A-Za-z0-9_@%+=:,./-]+$/;
+
+/** One literal argument for a POSIX shell. */
+const shellQuote = (s) => (PLAIN.test(s) ? s : `'${s.replace(/'/g, `'\\''`)}'`);
+
+/**
+ * A .env value. Single quotes are literal both to dotenv parsers and to a shell
+ * that sources the file; values they can't hold fall back to double quotes.
+ */
+const dotenvValue = (v) => (v === '' || PLAIN.test(v) ? v : /['\n\r]/.test(v) ? JSON.stringify(v) : `'${v}'`);
+return { shellQuote, dotenvValue };
+})();
+
+// core/qr.js
+const $m27 = (() => {
 // QR code reader (ISO/IEC 18004), for scanning two-factor setup codes from a
 // camera frame or a screenshot. Decoding only.
 //
@@ -4400,7 +4434,7 @@ return { QRError, scan, homography, LEVELS, rawDataModules, alignmentPositions, 
 })();
 
 // app/src/views/scan.js
-const $m27 = (() => {
+const $m28 = (() => {
 // Reading two-factor QR codes from the camera or from an image (a screenshot
 // of a setup page, say). Decoding is core/qr.js, on this device; frames and
 // images are never stored, and the camera stops as soon as the dialog closes —
@@ -4409,7 +4443,7 @@ const $m27 = (() => {
 const { h, signal, onCleanup } = $m0;
 const { icon } = $m1;
 const { Button, DialogHeader, openDialog } = $m2;
-const { scan } = $m26;
+const { scan } = $m27;
 const cameraAvailable = () => typeof navigator !== 'undefined' && window.isSecureContext && !!navigator.mediaDevices?.getUserMedia;
 
 const NO_CODE = 'No QR code found in that image. Try a sharper screenshot, cropped to the code.';
@@ -4552,7 +4586,7 @@ return { cameraAvailable, scanImage, pickImage, scanFromImage, scanWithCamera };
 })();
 
 // app/src/views/item.js
-const $m28 = (() => {
+const $m29 = (() => {
 // Item types: detail views and editors.
 
 const { h, signal, effect, onCleanup, when, list, computed } = $m0;
@@ -4560,7 +4594,8 @@ const { icon } = $m1;
 const { Button, IconButton, Field, Input, Textarea, PasswordInput, ValueRow, Monogram, Notice, Toggle, Segmented, DialogHeader, openDialog, copy, id, now, toast } = $m2;
 const { generatePassword, generatePassphrase, passwordBits, passphraseBits } = $m20;
 const { totp, parseOtpauth, parseMigration } = $m25;
-const { cameraAvailable, scanWithCamera, scanFromImage } = $m27;
+const { shellQuote, dotenvValue } = $m26;
+const { cameraAvailable, scanWithCamera, scanFromImage } = $m28;
 const TYPES = {
   login: { label: 'Login', plural: 'Logins', icon: 'login' },
   totp: { label: 'Two-factor code', plural: 'Two-factor', icon: 'clock' },
@@ -4667,8 +4702,8 @@ function ItemFields({ item }) {
 }
 
 function EnvTools({ item }) {
-  const dotenv = () => Object.entries(item.vars ?? {}).map(([k, v]) => `${k}=${/[\s"'#$]/.test(v) ? JSON.stringify(v) : v}`).join('\n');
-  const cli = `rspm run --env ${JSON.stringify(item.name).replace(/^"(.*)"$/, /\s/.test(item.name) ? '"$1"' : '$1')} -- npm start`;
+  const dotenv = () => Object.entries(item.vars ?? {}).map(([k, v]) => `${k}=${dotenvValue(v)}`).join('\n');
+  const cli = `rspm run --env ${shellQuote(item.name)} -- npm start`;
   return h('section', { class: 'panel' },
     h('h2', { class: 'panel-title' }, 'Use these variables'),
     h('div', { class: 'button-row' },
@@ -4746,13 +4781,16 @@ function chooseAccount({ accounts, skipped }, onImport) {
 
 /** "Scan QR code" and "From a screenshot". `onCode(text)` gets an accepted code. */
 function ScanButtons({ onCode }) {
-  const fail = (msg) => toast(msg, { tone: 'danger', ms: 5000 });
+  // A scan can finish after the editor has gone (rspm locked while an image was decoding): drop it.
+  let alive = true;
+  onCleanup(() => { alive = false; });
+  const fail = (msg) => { if (alive) toast(msg, { tone: 'danger', ms: 5000 }); };
   const camera = cameraAvailable();
   return h('div', { class: 'button-row scan-buttons' },
-    camera ? Button({ label: 'Scan QR code', icon: 'camera', size: 'sm', onClick: async () => { const t = await scanWithCamera(setupCodeProblem); if (t) onCode(t); } }) : null,
+    camera ? Button({ label: 'Scan QR code', icon: 'camera', size: 'sm', onClick: async () => { const t = await scanWithCamera(setupCodeProblem); if (t && alive) onCode(t); } }) : null,
     Button({
       label: camera ? 'From a screenshot' : 'Scan a QR code image', icon: 'image', size: 'sm', kind: camera ? 'ghost' : 'secondary',
-      onClick: async () => { const t = await scanFromImage(setupCodeProblem, fail); if (t) onCode(t); },
+      onClick: async () => { const t = await scanFromImage(setupCodeProblem, fail); if (t && alive) onCode(t); },
     }));
 }
 
@@ -4886,7 +4924,7 @@ return { TYPES, subtitle, matches, TotpCode, ItemHeader, ItemFields, EnvTools, I
 })();
 
 // core/sha3.js
-const $m29 = (() => {
+const $m30 = (() => {
 // SHA3-256, SHA3-512, SHAKE128 and SHAKE256 (FIPS 202). Zero dependencies.
 //
 // The 1600-bit Keccak state is 25 lanes of 64 bits, stored as 50 Uint32 words:
@@ -5002,7 +5040,7 @@ return { Keccak, sha3_256, sha3_512, shake128, shake256 };
 })();
 
 // core/mlkem.js
-const $m30 = (() => {
+const $m31 = (() => {
 // ML-KEM-768 (FIPS 203). Zero dependencies.
 //
 //   keygen(seed64)       → { ek: 1184 B, dk: 2400 B }   seed64 = d ‖ z (Go's NewDecapsulationKey768 seed)
@@ -5018,7 +5056,7 @@ const $m30 = (() => {
 // time (avoiding the integer-division leak known as KyberSlash). JS gives no
 // hard constant-time guarantees; this is best effort.
 
-const { sha3_256, sha3_512, shake256, Keccak } = $m29;
+const { sha3_256, sha3_512, shake256, Keccak } = $m30;
 const N = 256, Q = 3329, K = 3, ETA1 = 2, ETA2 = 2, DU = 10, DV = 4;
 const EK_BYTES = 384 * K + 32;                  // 1184
 const DK_BYTES = 768 * K + 96;                  // 2400
@@ -5283,13 +5321,13 @@ return { EK_BYTES, DK_BYTES, CT_BYTES, SEED_BYTES, checkEncapsulationKey, checkD
 })();
 
 // core/share.js
-const $m31 = (() => {
+const $m32 = (() => {
 // Sharing and public handles (PROTOCOL §8).
 
 const { b32, b32decode, b64, b64decode, concat, equal, fromUtf8, u32be, utf8 } = $m4;
 const { aesKey, deflate, hkdf, inflate, random, sha256, x25519, x25519Generate } = $m5;
 const { TYPE, chunk, locate, openBlock, sealBlock, BLOCK } = $m13;
-const mlkem = $m30;
+const mlkem = $m31;
 const { pool } = $m10;
 const MAX_HOURS = 720;
 const LINK_ORIGIN = 'https://rspm.link';
@@ -5554,15 +5592,15 @@ return { MAX_HOURS, LINK_ORIGIN, ShareError, createLinkShare, normalizeHandle, h
 })();
 
 // app/src/views/share.js
-const $m32 = (() => {
+const $m33 = (() => {
 // Share dialog, active shares, and the "shared with you" page.
 
 const { h, signal, when, list } = $m0;
 const { icon } = $m1;
 const { Button, Field, Input, Segmented, Select, Toggle, Notice, DialogHeader, openDialog, copy, toast, relativeHours, Empty, IconButton, confirmDialog } = $m2;
 const { session, store, save, writable, config } = $m16;
-const { ItemFields, TYPES } = $m28;
-const { createLinkShare, createRecipientShare, lookupHandle, openShare, deleteShare, normalizeHandle } = $m31;
+const { ItemFields, TYPES } = $m29;
+const { createLinkShare, createRecipientShare, lookupHandle, openShare, deleteShare, normalizeHandle } = $m32;
 const { putItem } = $m14;
 const EXPIRY = [['1', '1 hour'], ['24', '1 day'], ['168', '7 days'], ['720', '30 days']];
 
@@ -5736,7 +5774,8 @@ function ReceivedShare({ fragment, onDone }) {
         const item = share.item;
         return h('div', { class: 'stack' },
           h('div', null,
-            h('p', { class: 'eyebrow' }, share.meta.from ? `Shared by @${share.meta.from}` : 'Shared with you'),
+            // Anyone creating a share can put any handle in `from`: it's a claim, not a verified sender (PROTOCOL §8.1).
+            h('p', { class: 'eyebrow' }, share.meta.from ? `Shared with you · says it’s from @${share.meta.from}` : 'Shared with you'),
             h('h1', { class: 'auth-title' }, item.name || 'Untitled'),
             h('p', { class: 'muted small' }, TYPES[item.type]?.label ?? 'Item', burned ? ' · deleted from the server now that you’ve opened it' : ` · expires ${relativeHours(share.hour)}`)),
           burned && Notice({ tone: 'warn', title: 'Deleted from the server', children: 'Copy what you need before leaving this page — this link won’t open again.' }),
@@ -5753,7 +5792,7 @@ return { openShareDialog, SharesPage, ReceivedShare };
 })();
 
 // app/src/views/settings.js
-const $m33 = (() => {
+const $m34 = (() => {
 // Settings: account, device, handle, backup, credentials, about.
 
 const { h, signal } = $m0;
@@ -5764,11 +5803,11 @@ const { UnlockSection } = $m23;
 const { printKit, download } = $m18;
 const idb = $m3;
 const { formatAccountKey, deriveKeys, generateAccountKey, salt } = $m12;
-const { createIdentity, publishHandle, unpublishHandle, migrateHandle, lookupHandle, fingerprint, normalizeHandle } = $m31;
+const { createIdentity, publishHandle, unpublishHandle, migrateHandle, lookupHandle, fingerprint, normalizeHandle } = $m32;
 const { b64, b64decode, equal, utf8, fromUtf8, hex } = $m4;
 const { aesKey, hkdf, seal, open, random } = $m5;
 const { merge } = $m14;
-const mlkem = $m30;
+const mlkem = $m31;
 const { StrengthMeter, strongEnough } = $m21;
 function Section({ title, description, children }) {
   return h('section', { class: 'settings-section' },
@@ -5849,7 +5888,7 @@ function changeCredentials() {
         const sameUser = hex(await salt(username.peek())) === s.saltHex;
         // Passkeys wrap keys bound to this username. With a new username, never fall back to
         // storing the key unprotected — forget it and ask for a fresh passkey instead.
-        await replaceVault(username.peek(), fresh, key, !!rec?.akey);
+        await replaceVault(s, username.peek(), fresh, key, !!rec?.akey);
         if (!sameUser && (rec?.passkeys?.length || rec?.passkey)) toast('Add your passkeys again in Settings → Unlocking', { ms: 6000 });
         if (rotate.peek()) newKey.value = await formatAccountKey(key);
         else { toast('Credentials changed'); close(); }
@@ -6017,16 +6056,16 @@ return { SettingsPage };
 })();
 
 // app/src/views/vault.js
-const $m34 = (() => {
+const $m35 = (() => {
 // The unlocked vault: sidebar, item list, and detail pane.
 
 const { h, signal, computed, when, list, onCleanup, untrack } = $m0;
 const { icon } = $m1;
 const { Button, IconButton, Monogram, Empty, Notice, confirmDialog, toast } = $m2;
 const { session, doc, saving, save, lock, refresh } = $m16;
-const { TYPES, subtitle, matches, ItemHeader, ItemFields, ItemEditor, TotpCode, EnvTools } = $m28;
-const { openShareDialog, SharesPage } = $m32;
-const { SettingsPage } = $m33;
+const { TYPES, subtitle, matches, ItemHeader, ItemFields, ItemEditor, TotpCode, EnvTools } = $m29;
+const { openShareDialog, SharesPage } = $m33;
+const { SettingsPage } = $m34;
 const { putItem, removeItem } = $m14;
 const FILTERS = [
   ['all', 'All items', 'layers'],
@@ -6190,7 +6229,7 @@ return { VaultView };
 })();
 
 // app/src/main.js
-const $m35 = (() => {
+const $m36 = (() => {
 // Entry point.
 
 const { h, signal, mount, untrack, effect } = $m0;
@@ -6199,10 +6238,10 @@ const { ToastHost, Button, Notice } = $m2;
 const { session } = $m16;
 const { buildHash, pendingUpdate } = $m17;
 const { SignIn, CreateVault } = $m24;
-const { VaultView } = $m34;
-const { ReceivedShare } = $m32;
+const { VaultView } = $m35;
+const { ReceivedShare } = $m33;
 const { startAutoLock } = $m22;
-const { parseShareFragment } = $m31;
+const { parseShareFragment } = $m32;
 const screen = signal('signin');
 // Once signed in, the next locked screen is always sign-in — never back to vault creation.
 effect(() => { if (session.value) screen.value = 'signin'; });

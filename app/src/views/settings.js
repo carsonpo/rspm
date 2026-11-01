@@ -94,7 +94,7 @@ function changeCredentials() {
         const sameUser = hex(await salt(username.peek())) === s.saltHex;
         // Passkeys wrap keys bound to this username. With a new username, never fall back to
         // storing the key unprotected — forget it and ask for a fresh passkey instead.
-        await replaceVault(username.peek(), fresh, key, !!rec?.akey);
+        await replaceVault(s, username.peek(), fresh, key, !!rec?.akey);
         if (!sameUser && (rec?.passkeys?.length || rec?.passkey)) toast('Add your passkeys again in Settings → Unlocking', { ms: 6000 });
         if (rotate.peek()) newKey.value = await formatAccountKey(key);
         else { toast('Credentials changed'); close(); }

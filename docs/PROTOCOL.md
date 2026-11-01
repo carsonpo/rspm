@@ -328,6 +328,10 @@ same way as the vault but with a minimum of 1 block. The sender stores `s` in
 the vault's `shares` list so it can revoke the share early by presenting the
 delete tokens.
 
+**`from` is not authenticated.** It is whatever handle the sender's client
+wrote. Anyone can create a share claiming any handle, so clients must present
+it as the sender's claim, never as a verified identity.
+
 **Burn after reading.** Anyone holding `s` can derive the delete tokens. If
 `burn` is true, the recipient's client deletes the share after a successful
 decrypt. This is cooperative, **not** single-view enforcement: the share has

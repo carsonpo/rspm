@@ -180,7 +180,8 @@ export function ReceivedShare({ fragment, onDone }) {
         const item = share.item;
         return h('div', { class: 'stack' },
           h('div', null,
-            h('p', { class: 'eyebrow' }, share.meta.from ? `Shared by @${share.meta.from}` : 'Shared with you'),
+            // Anyone creating a share can put any handle in `from`: it's a claim, not a verified sender (PROTOCOL §8.1).
+            h('p', { class: 'eyebrow' }, share.meta.from ? `Shared with you · says it’s from @${share.meta.from}` : 'Shared with you'),
             h('h1', { class: 'auth-title' }, item.name || 'Untitled'),
             h('p', { class: 'muted small' }, TYPES[item.type]?.label ?? 'Item', burned ? ' · deleted from the server now that you’ve opened it' : ` · expires ${relativeHours(share.hour)}`)),
           burned && Notice({ tone: 'warn', title: 'Deleted from the server', children: 'Copy what you need before leaving this page — this link won’t open again.' }),

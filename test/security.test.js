@@ -1,7 +1,11 @@
-// Regression tests for the 2026-10 security review. Each one fails on the
-// code before the fix (base revision 2d7f03c).
+// Regression tests for the 2026-10 security review and its 2026-11 follow-up.
+// Each one fails on the code before its fix.
 
-import { readFileSync } from 'node:fs';
+import { readFileSync, existsSync, mkdtempSync, writeFileSync, rmSync } from 'node:fs';
+import { execFileSync } from 'node:child_process';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+import { shellQuote, dotenvValue } from '../app/src/quote.js';
 import { Vault, RollbackError, putItem } from '../core/vault.js';
 import { subkeys } from '../core/kdf.js';
 import { random, sha256, x25519, x25519Generate } from '../core/crypto.js';
@@ -195,5 +199,43 @@ export function shareIsShownOnlyOnceSaved() {
 
 export function lockClosesDialogs() {
   const src = readFileSync(new URL('../app/src/session.js', import.meta.url), 'utf8');
-  ok(/export function lock\(\) \{\s*closeAllDialogs\(\);/.test(src), 'lock() must close every dialog first');
+  ok(/export function lock\(\) \{\s*locks\+\+;\s*closeAllDialogs\(\);/.test(src), 'lock() must cancel pending work and close every dialog first');
+}
+
+// ── 2026-11 follow-up review (base revision 7f53394) ────────────────────────
+// The lock races (pending sign-in, QR import) are covered in tools/e2e.js.
+
+const hasSh = existsSync('/bin/sh');
+const sh = (script, ...args) => execFileSync('/bin/sh', ['-c', script, 'sh', ...args], { encoding: 'utf8' });
+const NASTY = [
+  'project', 'my project', 'project$(printf${IFS}PWNED)', '`printf PWNED`', 'a;printf PWNED', "it's", "''", '"q"',
+  'line\nbreak', '$HOME', '-x', '', 'a\\b', '!history', '*', '~', 'é ✓',
+];
+
+export function suggestedCommandQuotesTheName() {
+  if (!hasSh) return console.log('        (skipped: no /bin/sh)');
+  for (const name of NASTY) {
+    // The app's suggested command, with rspm replaced by printf of its arguments.
+    const out = sh(`printf '%s\\0' ${shellQuote(name)}`);
+    eq(out, `${name}\0`, JSON.stringify(name));
+  }
+}
+
+export function dotenvValuesStayLiteralWhenSourced() {
+  if (!hasSh) return console.log('        (skipped: no /bin/sh)');
+  const dir = mkdtempSync(join(tmpdir(), 'rspm-env-'));
+  try {
+    // Values with a single quote or a newline fall back to JSON's double quotes, which dotenv parsers need.
+    const values = NASTY.filter((v) => !/['\n]/.test(v));
+    const file = join(dir, '.env');
+    writeFileSync(file, values.map((v, i) => `V${i}=${dotenvValue(v)}`).join('\n'));
+    const out = sh(`set -a; . "$1"; printf '%s\\0' ${values.map((_, i) => `"$V${i}"`).join(' ')}`, file);
+    eq(out.split('\0').slice(0, -1), values);
+  } finally { rmSync(dir, { recursive: true, force: true }); }
+}
+
+export function shareSenderIsShownAsAClaim() {
+  const src = readFileSync(new URL('../app/src/views/share.js', import.meta.url), 'utf8');
+  ok(!/Shared by @/.test(src), 'the sender handle is unauthenticated: don’t present it as a fact');
+  ok(/says it’s from @\$\{share\.meta\.from\}/.test(src));
 }
